@@ -1,17 +1,31 @@
 # 專屬空間沙龍 POS — 單機測試版
 
-版本：32.0。此專案獨立於店用雲端系統。
+版本：32.1（第一關：資料安全）。
 
-- 資料只寫入 salon_offline_* 本機儲存空間。
-- 不連接 Firebase，不提供跨裝置同步。
-- 保留 JSON 備份與還原；切換瀏覽器或主畫面入口前請備份。
-- 主畫面啟動使用 standalone 顯示；Safari 分頁仍有網址列。
-- 網址載入需連網，尚未提供離線啟動、商店打包及完整商用驗收。
+此專案為獨立單機測試版，不連接 Firebase，不跨裝置同步。店用雲端專案不在本次修改範圍。
+
+## 儲存與升級
+
+- 所有業務資料以一個完整記錄存於 `salon_offline_database_v1`。每次寫入成功後才更新畫面。
+- 同一瀏覽器以 Web Locks 限制一個寫入視窗；其他視窗為唯讀。關閉原視窗後重新整理即可接續。
+- 更新時讀取舊 `salon_offline_*` 資料，首次成功儲存完整記錄後才清除已遷移的舊表；失敗則保留原資料。
+- 舊版視窗有資料變動時停止寫入並提示核對，避免静默覆蓋。升級前請關閉舊版視窗並下載 JSON 備份。
+- 掛單、取單、會員與人員連動編輯、結帳、資料還原以一筆完整記錄儲存。
+- 取單前現有開單自動保留為掛單。還原前快照與替換資料同筆儲存。
+- 檔案備份仍採業務 JSON 格式，可從 v32.0 匯入。原始資料下載用於故障診斷，不能直接作一般 JSON 還原。
+- Web Locks 不支援或取得失敗时為唯讀；請使用新版 Safari 或 Chrome。
+- localStorage 仍有容量限制；這次沒有改成商店原生資料庫。大型資料／雙份還原快照超過容量會拒絕寫入，原資料保留。
 
 ## 建置
 
-安裝 esbuild、react@19、react-dom@19，將 app.jsx 前加 React 與 react-dom/client 的 import，使用 esbuild bundle（classic JSX，Safari 15 / Chrome 100，production）後，把產出 script 接在 shell.html 後，再接 </body></html>。
+```
+npm install
+npm run build
+npm test
+```
 
-## 本次驗證
+`app.jsx` 為應用程式來源，`business-store.js` 為儲存層，`shell.html` 為既有樣式與啟動殼。build.cjs 產生自包含 index.html。manifest 與圖示維持主畫面 standalone 啟動。網址載入仍需網路，本版本尚未提供離線啟動或商店安裝包。
 
-8 個主頁伺服器渲染通過；JSON 還原與舊店用 storage key 隔離測試通過。實際 iPhone/iPad 加入主畫面仍需裝置驗收。未宣稱完整薪資、結帳流程已驗收。
+## 驗收
+
+詳見 ACCEPTANCE.md。自動測試包含儲存失敗、舊資料遷移、單筆保存、重試、唯讀視窗、過期資料攔截、掛單/取單、結帳及還原。iPhone/iPad 實機驗收仍待完成。完整薪資、退款、儲值與販售流程不屬於本關。
