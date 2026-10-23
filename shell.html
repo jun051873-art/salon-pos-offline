@@ -3,7 +3,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
    
-    <title>專屬空間沙龍｜POS v32.2 單機測試版</title>
+    <title>專屬空間沙龍｜POS v32.3 外觀測試版</title>
     
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -13137,6 +13137,31 @@
 <meta name="theme-color" content="#274c3f">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <style>.app-shell>main{height:100%;min-height:0;padding-bottom:env(safe-area-inset-bottom)}.app-shell{height:100vh;height:100dvh}html,body{overscroll-behavior-y:none}</style>
+<style id="appearance-v323">
+/* Scope effects to this offline app. Existing category and item colors stay intact. */
+.app-shell{font-size:var(--salon-font,16px);background:radial-gradient(ellipse at 85% 0%,#e3eaf07a,transparent 56%),linear-gradient(135deg,#ffffff55,transparent 65%),var(--salon-paper)!important}
+.app-shell main{background:transparent!important;min-width:0}
+.app-shell .card,.app-shell .pos-order,.app-shell .pos-services,.app-shell .work-header{background:var(--salon-surface)!important;backdrop-filter:blur(var(--salon-blur));-webkit-backdrop-filter:blur(var(--salon-blur));border-color:#dce3ea!important}
+.app-shell[data-surface="glass"] .card{box-shadow:0 8px 28px #5266750a,inset 0 1px #fff}
+.app-shell .input-field{min-height:44px;max-width:100%;font-size:1em;line-height:1.4}
+.app-shell .service-tools>input{min-width:0;flex:1 1 220px}
+.app-shell .stylist-picker{flex:0 0 auto;font-size:.8em}
+.app-shell .stylist-picker select{width:110px!important}
+.app-shell .pos-services .grid{gap:var(--salon-card-gap)}
+.app-shell .pos-services button.relative{padding:var(--salon-card-pad);min-height:132px;border-radius:var(--salon-radius);transition:transform .16s ease,box-shadow .16s ease}
+.app-shell .pos-services button.relative h3{font-size:1.12em;white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.app-shell .pos-services button.relative h3+div{font-size:1.2em}
+.app-shell .pos-services button.relative:focus-visible{outline:3px solid var(--salon-accent);outline-offset:2px}
+.look-advanced{border-top:1px solid #e2e8f0;padding-top:16px}
+.look-advanced>summary{cursor:pointer;font-weight:600;padding:8px 0;min-height:40px}
+.appearance-settings{max-width:1100px}.appearance-settings label{min-width:0;font-size:1em}
+.app-shell .look-presets{grid-template-columns:repeat(auto-fit,minmax(100px,1fr))}
+.app-shell [role="dialog"]{max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px)}
+@media(min-width:761px){.app-shell .pos-services .grid{grid-template-columns:repeat(var(--salon-columns),minmax(0,1fr))!important}}
+@media(max-width:760px){.app-shell .pos-layout{height:auto!important;overflow:visible!important}.app-shell .pos-services{min-height:340px;flex:none}.app-shell .pos-services>.flex-1{max-height:54dvh;min-height:240px}.app-shell .pos-order{min-width:0!important;width:100%!important}.app-shell .service-tools>input{flex-basis:100%;width:100%!important}.app-shell .stylist-picker{margin-left:0}.app-shell .pos-services button.relative{min-height:118px}.appearance-settings{padding:18px!important}}
+.app-shell[data-low-effects="true"] *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;animation:none!important;transition:none!important;scroll-behavior:auto!important}
+@media(prefers-reduced-motion:reduce){.app-shell *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style>
 </head>
 <body>
     <div id="root"><div style="padding:40px;font-family:system-ui">正在開啟專屬空間沙龍…</div></div><noscript>請在 Safari、Chrome 或 Edge 開啟本檔案並啟用 JavaScript。檔案預覽不一定能執行開單系統。</noscript>
