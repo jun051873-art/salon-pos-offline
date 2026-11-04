@@ -1,8 +1,8 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('fs'),os=require('os'),path=require('path'),es=require('esbuild');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'salon-orders-'));
 const source=fs.readFileSync(__dirname+'/../app.jsx','utf8').replace(/    const root = ReactDOM.createRoot[\s\S]*$/,'');
-es.buildSync({stdin:{contents:'import React from "react"; import {createBusinessStore,STORE_KEY} from "./business-store.js";\n'+source+'\nexport {filterOrderRecords,refundReportData,verifyProductReturnLinks,returnProductData,settleProductRefund,reviseOrderData,voidOrderData,settleOrderRefund,calculatePayroll,performanceData,validateStored};',loader:'jsx',resolveDir:path.resolve(__dirname,'..')},bundle:true,platform:'node',format:'cjs',outfile:dir+'/orders.cjs'});
-const {filterOrderRecords,refundReportData,verifyProductReturnLinks,returnProductData,settleProductRefund,reviseOrderData,voidOrderData,settleOrderRefund,calculatePayroll,performanceData,validateStored}=require(dir+'/orders.cjs');
+es.buildSync({stdin:{contents:'import React from "react"; import {createBusinessStore,STORE_KEY} from "./business-store.js";\n'+source+'\nexport {revisionRows,filterOrderRecords,refundReportData,verifyProductReturnLinks,returnProductData,settleProductRefund,reviseOrderData,voidOrderData,settleOrderRefund,calculatePayroll,performanceData,validateStored};',loader:'jsx',resolveDir:path.resolve(__dirname,'..')},bundle:true,platform:'node',format:'cjs',outfile:dir+'/orders.cjs'});
+const {revisionRows,filterOrderRecords,refundReportData,verifyProductReturnLinks,returnProductData,settleProductRefund,reviseOrderData,voidOrderData,settleOrderRefund,calculatePayroll,performanceData,validateStored}=require(dir+'/orders.cjs');
 const fixture=()=>{const policy={materialMode:'percent',materialValue:20,commissionRate:50};const item={id:'dye',cartId:'line1',name:'模擬染髮',price:2000,discount:0,stylistId:'staff',stylistName:'模擬人員',isProduct:false};item.payroll=calculatePayroll(item,policy,[{id:'helper',name:'模擬協助',mode:'fixed',base:'gross',value:100}]);const product={id:'product',cartId:'line2',name:'模擬商品',price:800,discount:0,stylistId:'staff',isProduct:true};const order={id:'order',date:'2026-11-04T04:00:00.000Z',visitId:'visit',branchId:'main',customerId:'customer',customerName:'測試會員',paymentMethod:'現金',items:[item,product],total:2800};return {safeTransactions:[order],safeCustomers:[{id:'customer',visits:1,totalSpend:2800}],safeServices:[{id:'product',name:'模擬商品',isProduct:true,stock:9}],safeInventoryLogs:[],safeSettings:{paymentMethods:['現金','轉帳'],salarySlips:[]}};};
 const current=c=>c.safeTransactions[0];
 test('order revision keeps original payroll rule, audit, member and differential inventory',()=>{const c=fixture(),old=current(c),before=JSON.stringify(c),next=structuredClone(old);next.items[0].discount=200;next.items.pop();const r=reviseOrderData(next,old,c,'折扣與誤加商品修正');assert.equal(r.transactions[0].total,1800);assert.equal(r.transactions[0].items[0].payroll.actual,1340);assert.equal(r.transactions[0].items[0].payroll.commission,670);assert.equal(r.services[0].stock,10);assert.equal(r.customers[0].totalSpend,1800);assert.equal(r.customers[0].visits,1);assert.equal(r.inventoryLogs[0].orderId,'order');assert.equal(r.inventoryLogs[0].itemId,'product');assert.equal(r.transactions[0].revisionHistory[0].total,2800);assert.equal(JSON.stringify(c),before);});
@@ -32,3 +32,12 @@ test('order search includes range endpoints and helper, matches voids identicall
  const rows=[{id:'AB1',date:'2026-10-31T12:00:00Z',branchId:'main',customerName:'測試',items:[{payroll:{helpers:[{id:'helper'}]}}]},{id:'AB2',date:'2026-11-01T12:00:00Z',branchId:'main',mainStylistId:'helper'},{id:'outside',date:'2026-11-02T12:00:00Z',branchId:'other'}];
  const b={from:'2026-10-31',to:'2026-11-01'};assert.deepEqual(filterOrderRecords(rows,b,'main','helper',' ab').map(t=>t.id),['AB2','AB1']);assert.equal(filterOrderRecords(rows,b,'other').length,0);assert.equal(filterOrderRecords(rows,null).length,0);assert.equal(filterOrderRecords(rows,{from:b.to,to:b.from}).length,0);assert.equal(filterOrderRecords(rows,b,'all','all','測試').length,1);
 });
+
+ test('revision history shows each before and after, including legacy consecutive edits',()=>{
+ const o={total:600,revisionHistory:[{total:600},{total:500}]};
+ assert.deepEqual(revisionRows(o).map(r=>[r.total,r.afterTotal]),[[600,500],[500,600]]);
+ const c=fixture(),old=current(c),next=structuredClone(old);next.items[0].price=1900;
+ const updated=reviseOrderData(next,old,c,'試算').transactions[0];
+ assert.equal(updated.revisionHistory[0].afterTotal,2700);
+ updated.total=999;assert.equal(revisionRows(updated)[0].afterTotal,2700);
+ });

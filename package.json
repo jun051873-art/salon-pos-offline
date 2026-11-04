@@ -1,6 +1,6 @@
 {
   "name": "salon-pos-offline",
-  "version": "32.8.0",
+  "version": "32.8.1",
   "private": true,
   "scripts": {
     "build": "node build.cjs",
