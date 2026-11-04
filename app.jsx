@@ -1,3 +1,74 @@
+function reviseOrderData(updatedOrder,expected,c,reason){
+ const {safeTransactions,safeCustomers,safeServices,safeInventoryLogs,safeSettings}=c;
+ if(!reason?.trim())throw Error('請填寫修改原因');
+    if (!updatedOrder.items?.length || updatedOrder.items.some(i=>!validLine(i)) || !Number.isFinite(new Date(updatedOrder.date).getTime())) throw Error('請檢查日期與項目金額；折扣不得超過售價');
+    const oldOrder = safeTransactions.find(t => t.id === updatedOrder.id);
+    assertOrderUnchanged(expected,oldOrder);
+    if(salaryOrderLocked(safeSettings,oldOrder)||salaryOrderLocked(safeSettings,updatedOrder))throw Error('此月份已有確認薪資條，不能直接修改訂單');
+    if(updatedOrder.paymentMethod!==oldOrder.paymentMethod&&!safeSettings.paymentMethods.includes(updatedOrder.paymentMethod))throw Error('付款方式已停用');
+
+    if(new Set(updatedOrder.items.map(i=>i.cartId)).size!==updatedOrder.items.length)throw Error('訂單項目重複');
+    let customerList=safeCustomers;
+    if(updatedOrder.newCustomer){const n=updatedOrder.newCustomer;if(!n.name?.trim()||!n.phone?.trim()||n.id!==updatedOrder.customerId)throw Error('會員姓名或電話不完整');if(safeCustomers.some(c=>c.id===n.id||String(c.phone||'').replace(/\D/g,'')===String(n.phone).replace(/\D/g,'')))throw Error('會員已存在，請取消後從顧客資料核對');customerList=[...safeCustomers,{...n,visits:0,totalSpend:0}];}
+    if(updatedOrder.customerId&&updatedOrder.customerId!==oldOrder.customerId&&!customerList.some(c=>c.id===updatedOrder.customerId&&!c.archivedAt))throw Error('會員不存在或已停用');
+    const normalizedItems = (updatedOrder.items || []).map(item => ({
+        ...item,
+        cartId: item.cartId || generateId(),
+        price: Math.max(0, Number(item.price) || 0),
+        discount: Math.max(0, Number(item.discount) || 0),
+        cost: Math.max(0, Number(item.cost) || 0)
+    }));
+    try {
+      for(let idx=0;idx<normalizedItems.length;idx++){
+        const item=normalizedItems[idx],oldItem=(oldOrder.items||[]).find((i,n)=>(i.cartId||('legacy-line-'+n))===item.cartId);
+        if(!oldItem||oldItem.id!==item.id||!!oldItem.isProduct!==!!item.isProduct||oldItem.stylistId!==item.stylistId)throw Error('訂單項目不一致，請重新開啟');
+        if(oldItem?.payroll){
+          if(!confirmedPayroll(oldItem))throw Error('原單制度快照不一致，請先核對原始備份');
+          normalizedItems[idx]={...item,payroll:calculatePayroll(item,oldItem.payroll.policy,oldItem.payroll.helpers),payrollPolicy:{...oldItem.payroll.policy}};
+        } else {delete item.payroll;}
+      }
+    }catch(e){throw e;}
+    const nextTotal = money(normalizedItems.reduce((sum, item) => sum + money(lineTotal(item)), 0));
+    const nextOrder = { ...updatedOrder, items: normalizedItems, total: nextTotal, updatedAt: new Date().toISOString(),revisionHistory:[...(oldOrder.revisionHistory||[]),{at:new Date().toISOString(),date:oldOrder.date,total:oldOrder.total,items:oldOrder.items,customerId:oldOrder.customerId,reason:reason.trim(),paymentMethod:oldOrder.paymentMethod,customerName:oldOrder.customerName}] };
+
+    delete nextOrder.newCustomer;
+    // 1. 依「舊訂單 vs 新訂單」計算每項商品庫存差額，而不是整張單重扣。
+    const qtyMap = (items) => (items || []).filter(i => i.isProduct).reduce((m, i) => {
+        m[i.id] = (m[i.id] || 0) + 1;
+        return m;
+    }, Object.create(null));
+    const oldQty = qtyMap(oldOrder.items);
+    const newQty = qtyMap(nextOrder.items);
+    const productIds = new Set([...Object.keys(oldQty), ...Object.keys(newQty)]);
+    for(const id of productIds){const delta=(newQty[id]||0)-(oldQty[id]||0),p=safeServices.find(s=>s.id===id);if(delta>0&&(!p||(p.stock!==null&&p.stock!==undefined&&Number(p.stock)<delta)))throw Error('修改後商品庫存不足，未儲存');}
+    for(const id of productIds){if((newQty[id]||0)===(oldQty[id]||0))continue;const p=safeServices.find(s=>s.id===id);if(!p||!p.isProduct)throw Error('調整商品已刪除或類型變更，請先核對庫存');if(p.stock!=null&&(!Number.isSafeInteger(Number(p.stock))||Number(p.stock)<0))throw Error('庫存數量異常');}
+    const updatedServices = safeServices.map(service => {
+        if (!service.isProduct || service.stock === null || service.stock === undefined || !productIds.has(service.id)) return service;
+        const deltaSold = (newQty[service.id] || 0) - (oldQty[service.id] || 0);
+        if(!deltaSold)return service;
+        return { ...service, stock: Math.max(0, Number(service.stock) - deltaSold) };
+    });
+
+    // 2. 庫存異動留下調整紀錄，日後查帳可追溯。
+    const inventoryAdjustments = [];
+    productIds.forEach(id => {
+        const deltaSold = (newQty[id] || 0) - (oldQty[id] || 0);
+        if (!deltaSold) return;
+        const item = (nextOrder.items || []).find(i => i.id === id) || (oldOrder.items || []).find(i => i.id === id);
+        inventoryAdjustments.push({
+            id: generateId(), date: new Date().toISOString(),
+            type: deltaSold > 0 ? '訂單修改追加' : '訂單修改回沖',
+            orderId:oldOrder.id,branchId:oldOrder.branchId||'',itemId:id,itemName: item?.name || '未知商品', qty: Math.abs(deltaSold), cost: Number(item?.cost) || 0,
+            note: `修改訂單 #${oldOrder.id.slice(0,6)}，庫存${deltaSold > 0 ? '追加扣除' : '回沖'}`,
+            operator: 'System'
+        });
+    });
+    const nextTransactions=safeTransactions.map(t=>t.id===nextOrder.id?nextOrder:t);
+    const countVisits=(tx,id)=>new Set(tx.filter(t=>t.customerId===id).map(t=>t.visitId||t.id)).size;
+    const nextCustomers=customerList.map(c=>{if(c.id!==oldOrder.customerId&&c.id!==nextOrder.customerId)return c;const delta=(nextOrder.customerId===c.id?nextOrder.total:0)-(oldOrder.customerId===c.id?Number(oldOrder.total||0):0);return {...c,visits:Math.max(0,Number(c.visits||0)+countVisits(nextTransactions,c.id)-countVisits(safeTransactions,c.id)),totalSpend:money(Math.max(0,Number(c.totalSpend||0)+delta))};});
+    const nextLogs=[...inventoryAdjustments,...safeInventoryLogs];
+    return {transactions:nextTransactions,customers:nextCustomers,services:updatedServices,inventoryLogs:nextLogs};
+}
 function RecoveryPoints(){const {showToast}=React.useContext(AppContext);const [points,setPoints]=useState([]);const refresh=()=>{try{const rows=JSON.parse(localStorage.getItem('salon_offline_recovery_points')||'[]');setPoints(Array.isArray(rows)?rows:[]);}catch(e){showToast('復原點無法讀取，請下載原始資料','error');}};return <details className="recovery-points mb-5" onToggle={e=>{if(e.currentTarget.open)refresh();}}><summary>關鍵操作前復原點（最近 3 次）</summary><p className="report-footnote">結帳、薪資收付款及庫存異動等關鍵操作前保存。只存在本機，不能替代外部備份；下載後可由下方還原。一般資料編輯不會每次建立復原點。</p>{points.map(p=><div className="consumption-row" key={p.id}><span>{localDateTime(p.at).replace('T',' ')}</span><button className="btn btn-secondary" onClick={()=>downloadJSON(p.data,'salon_offline_recovery_'+p.at.replace(/[:.]/g,'-')+'.json')}>下載此復原點</button></div>)}{!points.length&&<p className="text-sm">尚無復原點。</p>}</details>;}
 function correctionDraft(slip,amount,reason){const n=Number(amount);if(!slip?.paidAt||slip.voidedAt)throw Error('僅能更正已付且未作廢的薪資條');if(amount===''||!Number.isFinite(n)||n===0)throw Error('請輸入非零的補發或收回金額');if(!String(reason||'').trim())throw Error('請填寫更正原因');const changes=slip.corrections||[];if(changes.some(x=>!x.paidAt&&!x.voidedAt))throw Error('請先處理上一筆未完成的更正');const actual=money(slip.net+changes.filter(x=>x.paidAt&&!x.voidedAt).reduce((s,x)=>s+Number(x.amount),0));if(money(actual+n)<0)throw Error('收回金額超過已支付總額');return {id:generateId(),amount:money(n),reason:String(reason).trim(),createdAt:new Date().toISOString()};}
 function settleCorrection(settings,expenses,slipId,correctionId){const slip=(settings.salarySlips||[]).find(s=>s.id===slipId);const correction=slip?.corrections?.find(c=>c.id===correctionId);if(!slip?.paidAt||slip.voidedAt||!correction||correction.paidAt||correction.voidedAt)throw Error('更正狀態已變更，請重新查看');const paidAt=new Date().toISOString(),expenseId=generateId();return {settings:{...settings,salarySlips:settings.salarySlips.map(s=>s.id===slipId?{...s,corrections:s.corrections.map(c=>c.id===correctionId?{...c,paidAt,expenseId}:c)}:s)},expenses:[...expenses,{id:expenseId,date:localDate(paidAt),branchId:slip.branchId,staffId:slip.staffId,type:correction.amount>0?'薪資補發':'薪資收回',amount:correction.amount,salarySlipId:slip.id,salaryCorrectionId:correction.id,note:slip.month+' '+slip.staffName+'｜'+correction.reason}]};}
@@ -6,7 +77,29 @@ function verifySalaryLinks(data){const slips=data.settings.salarySlips||[],expen
  if(s.corrections!==undefined){if(!Array.isArray(s.corrections))throw Error('薪資更正格式錯誤');const ids=new Set();for(const c of s.corrections){if(!c.id||ids.has(c.id)||!Number.isFinite(c.amount)||!c.amount||!c.reason)throw Error('薪資更正資料錯誤');ids.add(c.id);if(c.paidAt&&!c.voidedAt){const e=expenseMap.get(c.expenseId);if(!e||e.salarySlipId!==s.id||e.salaryCorrectionId!==c.id||e.amount!==c.amount)throw Error('薪資更正與收付款紀錄不一致');}}}}
  for(const e of data.expenses.filter(e=>e.salarySlipId)){const s=slips.find(s=>s.id===e.salarySlipId);if(!s)throw Error('付款紀錄找不到薪資條');if(e.salaryCorrectionId){if(!s.corrections?.some(c=>c.id===e.salaryCorrectionId&&c.expenseId===e.id&&c.paidAt))throw Error('付款紀錄找不到已完成更正');}else if(s.paymentExpenseId!==e.id||!s.paidAt)throw Error('薪資付款重複或連結錯誤');}
 }
-function voidOrderData(orderId,reason,c){const order=c.safeTransactions.find(t=>t.id===orderId);if(!order)throw Error('找不到訂單，或已作廢');if(!reason?.trim())throw Error('請填寫作廢原因');if(salaryOrderLocked(c.safeSettings,order))throw Error('訂單月份薪資已確認，不能直接作廢');const at=new Date().toISOString(),products=(order.items||[]).filter(i=>i.isProduct),counts={};for(const i of products)counts[i.id]=(counts[i.id]||0)+1;const transactions=c.safeTransactions.filter(t=>t.id!==orderId);const uniqueVisit=order.visitId||order.id;const remains=transactions.some(t=>t.customerId===order.customerId&&(t.visitId||t.id)===uniqueVisit);const customers=c.safeCustomers.map(x=>x.id===order.customerId?{...x,visits:Math.max(0,Number(x.visits||0)-(remains?0:1)),totalSpend:money(Math.max(0,Number(x.totalSpend||0)-Number(order.total||0)))}:x);return {transactions,customers,services:c.safeServices.map(p=>counts[p.id]&&p.stock!==null&&p.stock!==undefined?{...p,stock:Number(p.stock||0)+counts[p.id]}:p),inventoryLogs:[...products.map(i=>({id:generateId(),date:at,branchId:order.branchId||'',type:'作廢回沖',itemId:i.id,itemName:i.name,qty:1,cost:Number(i.cost||0),note:'訂單 '+orderId+'｜'+reason,operator:'本機管理者'})),...c.safeInventoryLogs],settings:{...c.safeSettings,voidedOrders:[{...JSON.parse(JSON.stringify(order)),voidedAt:at,voidReason:reason.trim()},...(c.safeSettings.voidedOrders||[])]}};}
+function orderContext(){const d=localRecoveryPoint();return {safeTransactions:d.transactions,safeCustomers:d.customers,safeServices:d.services,safeSettings:d.settings,safeInventoryLogs:d.inventoryLogs};}
+function assertOrderUnchanged(expected,actual){if(!actual)throw Error('找不到訂單，或已作廢');if(expected&&JSON.stringify(expected)!==JSON.stringify(actual))throw Error('訂單已變更，請關閉視窗後重新開啟');}
+function voidOrderData(orderId,reason,c,options={}){
+ const order=c.safeTransactions.find(t=>t.id===orderId);assertOrderUnchanged(options.expected,order);
+ if(!reason?.trim())throw Error('請填寫作廢原因');if(salaryOrderLocked(c.safeSettings,order))throw Error('訂單月份薪資已確認，不能直接作廢');
+ const refundStatus=options.refundStatus||'pending';if(!['pending','paid','notCollected'].includes(refundStatus))throw Error('請選擇退款狀態');
+ if(refundStatus==='paid'&&!c.safeSettings.paymentMethods.includes(options.refundMethod))throw Error('請選擇退款方式');
+ const at=new Date().toISOString(),products=(order.items||[]).filter(i=>i.isProduct),counts=new Map();
+ if(products.length&&typeof options.returnStock!=='boolean')throw Error('請確認商品是否退回庫存');
+ if(options.returnStock)for(const i of products)counts.set(i.id,(counts.get(i.id)||0)+1);
+ for(const id of counts.keys()){const p=c.safeServices.find(x=>x.id===id);if(!p||!p.isProduct)throw Error('退回商品已刪除或類型已變更，請先核對庫存');if(p.stock!=null&&(!Number.isSafeInteger(Number(p.stock))||Number(p.stock)<0))throw Error('商品庫存異常，請先核對');}
+ const transactions=c.safeTransactions.filter(t=>t.id!==orderId),uniqueVisit=order.visitId||order.id;
+ const remains=transactions.some(t=>t.customerId===order.customerId&&(t.visitId||t.id)===uniqueVisit);
+ const customers=c.safeCustomers.map(x=>x.id===order.customerId?{...x,visits:Math.max(0,Number(x.visits||0)-(remains?0:1)),totalSpend:money(Math.max(0,Number(x.totalSpend||0)-Number(order.total||0)))}:x);
+ const refund={status:order.total===0?'notRequired':refundStatus,amount:money(Number(order.total)),method:refundStatus==='paid'?options.refundMethod:'',recordedAt:at,...(refundStatus==='paid'?{paidAt:at}:{})};
+ return {transactions,customers,services:c.safeServices.map(p=>counts.has(p.id)&&p.stock!=null?{...p,stock:Number(p.stock)+counts.get(p.id)}:p),inventoryLogs:[...(options.returnStock?products:[]).map(i=>({id:generateId(),date:at,branchId:order.branchId||'',orderId,type:'作廢回沖',itemId:i.id,itemName:i.name,qty:1,cost:Number(i.cost||0),note:'訂單 '+orderId+'｜'+reason,operator:'本機管理者'})),...c.safeInventoryLogs],settings:{...c.safeSettings,voidedOrders:[{...JSON.parse(JSON.stringify(order)),voidedAt:at,voidReason:reason.trim(),returnStock:!!options.returnStock,refund},...(c.safeSettings.voidedOrders||[])]}};
+}
+function settleOrderRefund(settings,orderId,method){
+ const order=(settings.voidedOrders||[]).find(o=>o.id===orderId);if(!order||order.refund?.status!=='pending')throw Error('此單不是待退款，或已登記退款');
+ if(!settings.paymentMethods.includes(method))throw Error('請選擇退款方式');
+ return {...settings,voidedOrders:settings.voidedOrders.map(o=>o.id===orderId?{...o,refund:{...o.refund,status:'paid',method,paidAt:new Date().toISOString()}}:o)};
+}
+function VoidOrderModal({order,settings,onClose,onSave}){const [reason,setReason]=useState(''),[status,setStatus]=useState('pending'),[method,setMethod]=useState(settings.paymentMethods[0]||''),[returnStock,setReturnStock]=useState(false);return <Modal title="作廢與退款登記" onClose={onClose}><div className="space-y-4"><p>{order.customerName||'散客'} · {formatCurrency(order.total)}</p><p className="text-sm text-slate-500">作廢會撤回本單業績及會員累計。此處只記錄退款，不會替你操作銀行或支付平台。</p><label className="block">作廢原因<input aria-label="作廢原因" className="input-field" value={reason} onChange={e=>setReason(e.target.value)}/></label><label className="block">款項處理<select aria-label="款項處理" className="input-field" value={status} onChange={e=>setStatus(e.target.value)}><option value="pending">尚未退款，保留待退款紀錄</option><option value="paid">已實際全額退款</option><option value="notCollected">誤開單，實際未收款</option></select></label>{status==='paid'&&<label className="block">退款方式<select aria-label="退款方式" className="input-field" value={method} onChange={e=>setMethod(e.target.value)}>{settings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label>}{order.items.some(i=>i.isProduct)&&<label className="flex gap-2"><input type="checkbox" checked={returnStock} onChange={e=>setReturnStock(e.target.checked)}/>本單商品已全部退回且可再販售，回補庫存</label>}<p className="text-sm text-slate-500">未退回或不可再販售的商品不回補。本次提供整單作廢與全額退款登記；部分退貨／部分退款尚未開放。</p><button className="btn btn-danger w-full" onClick={()=>onSave(reason,{refundStatus:status,refundMethod:method,returnStock,expected:order})}>確認作廢</button></div></Modal>;}
 function localRecoveryPoint(){const store=getBusinessStore(),data={schemaVersion:5,exportedAt:new Date().toISOString()};for(const [k,key]of Object.entries(DATA_KEYS))data[k]=store.get(key);data.draft=store.get('salon_offline_draft');return JSON.parse(JSON.stringify(data));}
 function isStorageQuota(e){return e?.name==='QuotaExceededError'||e?.name==='NS_ERROR_DOM_QUOTA_REACHED';}
 function storageFailure(e){return e?.name==='SecurityError'?'瀏覽器拒絕本機儲存，請確認使用一般視窗並允許網站儲存。':isStorageQuota(e)?'本機儲存空間不足，請下載備份；不要清除瀏覽器資料。':('寫入錯誤：'+(e?.message||'未知原因'));}
@@ -1289,69 +1382,16 @@ const {safeTransactions,confirmAction,transactions,customers,setCustomers,safeSe
                     }).sort((a,b) => new Date(b.date) - new Date(a.date));
                 }, [safeTransactions, queryDate, searchTerm, dateMode, filterStylist, filterBranch]);
 
-                        const handleDeleteOrder = orderId=>{const reason=prompt('作廢原因（保留原單；若實際退款請另行核對收付款）')?.trim();if(!reason)return;confirmAction('作廢訂單','確認此筆開單應作廢？原單保留，會員與商品庫存將回沖。',()=>{try{const changes=voidOrderData(orderId,reason,{safeTransactions,safeCustomers,safeServices,safeSettings,safeInventoryLogs});commitTables(changes);setTransactions(changes.transactions);setCustomers(changes.customers);setServices(changes.services);setInventoryLogs(changes.inventoryLogs);setSettings(changes.settings);showToast('訂單已作廢，原單及原因已保存');}catch(e){showToast(e.message,'error');}});};
+const [voidingOrder,setVoidingOrder]=useState(null);
+const handleDeleteOrder=id=>setVoidingOrder(safeTransactions.find(t=>t.id===id));
+const saveVoid=(reason,options)=>{try{commitTables(voidOrderData(voidingOrder.id,reason,orderContext(),options));setVoidingOrder(null);showToast('已作廢；原單、退款狀態與庫存處理已保存');}catch(e){showToast(e.message,'error');}};
+const [refundTarget,setRefundTarget]=useState(null),[refundMethod,setRefundMethod]=useState('');
+const markRefund=t=>{setRefundTarget(t);setRefundMethod(safeSettings.paymentMethods.includes(t.paymentMethod)?t.paymentMethod:safeSettings.paymentMethods[0]||'');};
+const saveRefund=()=>{try{const settings=localRecoveryPoint().settings;commitTables({settings:settleOrderRefund(settings,refundTarget.id,refundMethod)});setRefundTarget(null);showToast('已登記全額退款');}catch(e){showToast(e.message,'error');}};
 
-const handleUpdateOrder = (updatedOrder) => {
-    if (!updatedOrder.items?.length || updatedOrder.items.some(i=>!validLine(i)) || !Number.isFinite(new Date(updatedOrder.date).getTime())) return showToast('請檢查日期與項目金額；折扣不得超過售價','error');
-    const oldOrder = safeTransactions.find(t => t.id === updatedOrder.id);
-    if(salaryOrderLocked(safeSettings,oldOrder)||salaryOrderLocked(safeSettings,updatedOrder))return showToast('此月份已有確認薪資條，不能直接修改訂單','error');
-    if (!oldOrder) { showToast('找不到原訂單', 'error'); return; }
 
-    const normalizedItems = (updatedOrder.items || []).map(item => ({
-        ...item,
-        cartId: item.cartId || generateId(),
-        price: Math.max(0, Number(item.price) || 0),
-        discount: Math.max(0, Number(item.discount) || 0),
-        cost: Math.max(0, Number(item.cost) || 0)
-    }));
-    try {
-      for(let idx=0;idx<normalizedItems.length;idx++){
-        const item=normalizedItems[idx],oldItem=(oldOrder.items||[]).find(i=>i.cartId===item.cartId);
-        if(oldItem?.payroll){
-          if(!confirmedPayroll(oldItem))throw Error('原單制度快照不一致，請先核對原始備份');
-          normalizedItems[idx]={...item,payroll:calculatePayroll(item,oldItem.payroll.policy,oldItem.payroll.helpers),payrollPolicy:{...oldItem.payroll.policy}};
-        } else {delete item.payroll;}
-      }
-    }catch(e){return showToast(e.message,'error');}
-    const nextTotal = normalizedItems.reduce((sum, item) => sum + Math.max(0, item.price - item.discount), 0);
-    const nextOrder = { ...updatedOrder, items: normalizedItems, total: nextTotal, updatedAt: new Date().toISOString(),revisionHistory:[...(oldOrder.revisionHistory||[]),{at:new Date().toISOString(),date:oldOrder.date,total:oldOrder.total,items:oldOrder.items,customerId:oldOrder.customerId,reason:'查單修正；保留原制度'}] };
-
-    // 1. 依「舊訂單 vs 新訂單」計算每項商品庫存差額，而不是整張單重扣。
-    const qtyMap = (items) => (items || []).filter(i => i.isProduct).reduce((m, i) => {
-        m[i.id] = (m[i.id] || 0) + 1;
-        return m;
-    }, {});
-    const oldQty = qtyMap(oldOrder.items);
-    const newQty = qtyMap(nextOrder.items);
-    const productIds = new Set([...Object.keys(oldQty), ...Object.keys(newQty)]);
-    for(const id of productIds){const delta=(newQty[id]||0)-(oldQty[id]||0),p=safeServices.find(s=>s.id===id);if(delta>0&&(!p||(p.stock!==null&&p.stock!==undefined&&Number(p.stock)<delta)))return showToast('修改後商品庫存不足，未儲存','error');}
-    const updatedServices = safeServices.map(service => {
-        if (!service.isProduct || service.stock === null || service.stock === undefined || !productIds.has(service.id)) return service;
-        const deltaSold = (newQty[service.id] || 0) - (oldQty[service.id] || 0);
-        return { ...service, stock: Math.max(0, Number(service.stock) - deltaSold) };
-    });
-
-    // 2. 庫存異動留下調整紀錄，日後查帳可追溯。
-    const inventoryAdjustments = [];
-    productIds.forEach(id => {
-        const deltaSold = (newQty[id] || 0) - (oldQty[id] || 0);
-        if (!deltaSold) return;
-        const item = (nextOrder.items || []).find(i => i.id === id) || (oldOrder.items || []).find(i => i.id === id);
-        inventoryAdjustments.push({
-            id: generateId(), date: new Date().toISOString(),
-            type: deltaSold > 0 ? '訂單修改追加' : '訂單修改回沖',
-            itemName: item?.name || '未知商品', qty: Math.abs(deltaSold), cost: Number(item?.cost) || 0,
-            note: `修改訂單 #${oldOrder.id.slice(0,6)}，庫存${deltaSold > 0 ? '追加扣除' : '回沖'}`,
-            operator: 'System'
-        });
-    });
-    const nextTransactions=safeTransactions.map(t=>t.id===nextOrder.id?nextOrder:t);
-    const countVisits=(tx,id)=>new Set(tx.filter(t=>t.customerId===id).map(t=>t.visitId||t.id)).size;
-    const nextCustomers=safeCustomers.map(c=>{if(c.id!==oldOrder.customerId&&c.id!==nextOrder.customerId)return c;const delta=(nextOrder.customerId===c.id?nextOrder.total:0)-(oldOrder.customerId===c.id?Number(oldOrder.total||0):0);return {...c,visits:Math.max(0,Number(c.visits||0)+countVisits(nextTransactions,c.id)-countVisits(safeTransactions,c.id)),totalSpend:money(Math.max(0,Number(c.totalSpend||0)+delta))};});
-    const nextLogs=[...inventoryAdjustments,...safeInventoryLogs];
-    try{commitTables({transactions:nextTransactions,customers:nextCustomers,services:updatedServices,inventoryLogs:nextLogs});setTransactions(nextTransactions);setCustomers(nextCustomers);setServices(updatedServices);setInventoryLogs(nextLogs);}catch(e){return showToast(e.message,'error');}
-    setEditingOrder(null);
-    showToast('訂單已修正，庫存、顧客消費與業績已同步');
+const handleUpdateOrder = (updatedOrder,reason) => {
+ try{const changes=reviseOrderData(updatedOrder,editingOrder,orderContext(),reason);commitTables(changes);setEditingOrder(null);showToast('修正已保存；若金額改變，請另行核對實際補收／退差額');}catch(e){showToast(e.message,'error');}
 };
 // 替換你原本的 EditOrderModal
                 
@@ -1436,8 +1476,8 @@ const groups=Object.values(filteredOrders.reduce((acc,t)=>{const id=t.mainStylis
 <div className="relative"><Search className="absolute left-3 top-3 text-slate-400" size={18}/><input type="text" className="input-field pl-10" placeholder="搜尋..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}/></div>                            </div>
                         </div>
 
-<div className="order-summary">共 {filteredOrders.length} 單 · 實收 {formatCurrency(filteredOrders.reduce((n,t)=>n+Number(t.total||0),0))}</div>
-{dateMode==='date'&&filterStylist==='all'?<><p className="group-note">依整單負責人分欄；共同服務人員列於單內，每筆訂單只計一次。</p><div className="designer-board">{groups.map(g=><section key={g.id} className="designer-column"><header><strong>{g.name}</strong><span>{g.orders.length} 單 · 服務 {formatCurrency(g.orders.reduce((n,t)=>n+(t.items||[]).filter(i=>!i.isProduct).reduce((sum,i)=>sum+lineTotal(i),0),0))}<small>實收 {formatCurrency(g.orders.reduce((n,t)=>n+Number(t.total||0),0))}</small></span></header><div>{g.orders.map(renderOrder)}</div></section>)}</div></>:<div className="order-grid">{filteredOrders.map(renderOrder)}</div>}
+<div className="order-summary">共 {filteredOrders.length} 單 · 單據金額 {formatCurrency(filteredOrders.reduce((n,t)=>n+Number(t.total||0),0))}</div>
+{dateMode==='date'&&filterStylist==='all'?<><p className="group-note">依整單負責人分欄；共同服務人員列於單內，每筆訂單只計一次。</p><div className="designer-board">{groups.map(g=><section key={g.id} className="designer-column"><header><strong>{g.name}</strong><span>{g.orders.length} 單 · 服務 {formatCurrency(g.orders.reduce((n,t)=>n+(t.items||[]).filter(i=>!i.isProduct).reduce((sum,i)=>sum+lineTotal(i),0),0))}<small>單據金額 {formatCurrency(g.orders.reduce((n,t)=>n+Number(t.total||0),0))}</small></span></header><div>{g.orders.map(renderOrder)}</div></section>)}</div></>:<div className="order-grid">{filteredOrders.map(renderOrder)}</div>}
 {filteredOrders.length === 0 && (
                             <div className="text-center py-20 bg-white rounded-xl border border-dashed text-slate-400 flex flex-col items-center gap-2">
                                 <ClipboardList size={40} className="opacity-20"/>
@@ -1445,7 +1485,7 @@ const groups=Object.values(filteredOrders.reduce((acc,t)=>{const id=t.mainStylis
                             </div>
                         )}
 
-                        <details className="card p-4 mt-5"><summary>作廢訂單紀錄</summary>{(safeSettings.voidedOrders||[]).filter(t=>localDate(t.date).startsWith(queryDate)&&branchMatch(t,filterBranch)&&(filterStylist==='all'||t.mainStylistId===filterStylist)).map(t=><div className="consumption-row" key={t.id}><span>{localDate(t.date)} · {t.customerName} · {formatCurrency(t.total)}</span><span>{t.voidReason} · 作廢於 {localDate(t.voidedAt)}</span></div>)}</details>{editingOrder && <EditOrderModal order={editingOrder} onClose={()=>setEditingOrder(null)} onSave={handleUpdateOrder}/>}
+                        <details className="card p-4 mt-5"><summary>作廢訂單紀錄</summary>{(safeSettings.voidedOrders||[]).filter(t=>localDate(t.date).startsWith(queryDate)&&branchMatch(t,filterBranch)&&(filterStylist==='all'||t.mainStylistId===filterStylist)).map(t=><div className="consumption-row" key={t.id}><span>{localDate(t.date)} · {t.customerName} · {formatCurrency(t.total)}</span><span>{t.voidReason} · 作廢於 {localDate(t.voidedAt)}<small className="block">{({pending:'待退款',paid:'已全額退款',notCollected:'實際未收款',notRequired:'零元，無須退款'})[t.refund?.status]||'舊單：退款狀態未核對'}{t.refund?.paidAt&&' · '+localDate(t.refund.paidAt)+' · '+t.refund.method}</small></span>{t.refund?.status==='pending'&&<button className="btn btn-secondary" onClick={()=>markRefund(t)}>登記已退款</button>}</div>)}</details>{refundTarget&&<Modal title="登記已退款" onClose={()=>setRefundTarget(null)}><div className="space-y-4"><p>確認已實際退還 {formatCurrency(refundTarget.total)} 給 {refundTarget.customerName||'散客'}。這項操作只登記款項，不會再回補庫存或重扣業績。</p><label className="block">退款方式<select aria-label="退款方式" className="input-field" value={refundMethod} onChange={e=>setRefundMethod(e.target.value)}>{safeSettings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label><button className="btn btn-primary w-full" onClick={saveRefund}>確認已實際退款</button></div></Modal>}{voidingOrder&&<VoidOrderModal order={voidingOrder} settings={safeSettings} onClose={()=>setVoidingOrder(null)} onSave={saveVoid}/>}{editingOrder && <EditOrderModal order={editingOrder} onClose={()=>setEditingOrder(null)} onSave={handleUpdateOrder}/>}
                     </div>
                 );
             };
@@ -1453,8 +1493,9 @@ const EditOrderModal = ({ order, onClose, onSave }) => {
 const {setCustomers,safeCustomers,showToast,safeSettings,safeStylists}=React.useContext(AppContext);
 
     // 💡 關鍵：我們建立一個與外部完全分離的 Local State
-    const [form, setForm] = useState(() => ({ ...JSON.parse(JSON.stringify(order)), items: (order.items || []).map(item => ({ ...item, cartId: item.cartId || generateId(), price: Number(item.price)||0, discount: Number(item.discount)||0, cost: Number(item.cost)||0 })) })); 
+    const [form, setForm] = useState(() => ({ ...JSON.parse(JSON.stringify(order)), items: (order.items || []).map((item,index) => ({ ...item, cartId: item.cartId || ('legacy-line-'+index), price: Number(item.price)||0, discount: Number(item.discount)||0, cost: Number(item.cost)||0 })) }));
     
+    const [editReason,setEditReason]=useState('');
     // 💡 關鍵：防止輸入框在修改時觸發整個元件的重新對焦與重繪
     const updateItem = useCallback((cartId, field, value) => {
         setForm(prevForm => {
@@ -1482,9 +1523,9 @@ const {setCustomers,safeCustomers,showToast,safeSettings,safeStylists}=React.use
         if (!inputPhone) return;
         const newId = generateId();
         const newCustomer = { id: newId, name: inputName.trim(), phone: inputPhone.trim(), notes: '由查單介面轉入', visits: 0, totalSpend: 0, tags: [] };
-        setCustomers([...safeCustomers, newCustomer]);
-        setForm({ ...form, customerId: newId, customerName: inputName });
-        showToast(`已成功建立會員：${newCustomer.name}`);
+        if(safeCustomers.some(c=>String(c.phone||'').replace(/\D/g,'')===newCustomer.phone.replace(/\D/g,'')))return showToast('這個電話已有會員，請取消後到顧客資料核對','error');
+        setForm({ ...form, newCustomer,customerId: newId, customerName: newCustomer.name });
+        showToast('會員將與訂單修正一起儲存；取消不會建立會員');
     };
 
     return (
@@ -1511,19 +1552,19 @@ const {setCustomers,safeCustomers,showToast,safeSettings,safeStylists}=React.use
                                 <div className="flex-1"><div className="font-bold text-sm">{item.name}</div></div>
                                 <div className="w-24">
                                     <label className="text-[10px] block text-slate-400">售價</label>
-                                    <input type="number" className="input-field py-1 px-2 text-sm" value={item.price} onChange={e=>updateItem(item.cartId, 'price', Number(e.target.value))}/>
+                                    <input aria-label={item.name+'售價'} type="number" className="input-field py-1 px-2 text-sm" value={item.price} onChange={e=>updateItem(item.cartId, 'price', Number(e.target.value))}/>
                                 </div>
                                 <div className="w-20">
                                     <label className="text-[10px] block text-slate-400">折扣</label>
-                                    <input type="number" className="input-field py-1 px-2 text-sm text-red-500" value={item.discount||0} onChange={e=>updateItem(item.cartId, 'discount', Number(e.target.value))}/>
+                                    <input aria-label={item.name+'折扣'} type="number" className="input-field py-1 px-2 text-sm text-red-500" value={item.discount||0} onChange={e=>updateItem(item.cartId, 'discount', Number(e.target.value))}/>
                                 </div>
-                                <button onClick={()=>deleteItem(item.cartId)} className="text-slate-400 hover:text-red-500 p-2"><Trash2 size={16}/></button>
+                                <button aria-label={'移除訂單項目 '+item.name} onClick={()=>deleteItem(item.cartId)} className="text-slate-400 hover:text-red-500 p-2"><Trash2 size={16}/></button>
                             </div>
                         ))}
                     </div>
                 </div>
                 <details className="border-t pt-4"><summary className="font-bold cursor-pointer">業績與抽成明細（依原單制度）</summary><div className="space-y-4 mt-4">{form.items.map(item=>{let ledger,error;try{ledger=item.payroll?calculatePayroll(item,item.payroll.policy,item.payroll.helpers):null;}catch(e){error=e.message;}return <section key={item.cartId} className="border rounded-xl p-3"><h4 className="font-bold mb-2">{item.name}</h4>{error?<p className="payroll-error">{error}</p>:<PayrollBreakdown item={item} ledger={ledger}/>}</section>;})}</div></details>
-                <div className="border-t pt-4 flex justify-between items-center"><div className="text-xl font-black text-slate-800">總計: {formatCurrency(form.total)}</div><div className="flex gap-2"><button onClick={onClose} className="btn btn-secondary">取消</button><button onClick={()=>onSave(form)} className="btn btn-primary">儲存修正</button></div></div>
+                {(order.revisionHistory||[]).length>0&&<details><summary>修改紀錄（{order.revisionHistory.length} 次）</summary>{order.revisionHistory.map((r,i)=><div className="border-t py-3 text-sm" key={i}>{localDateTime(r.at).replace('T',' ')} · {r.reason}<br/>修改前 {formatCurrency(r.total)} · {r.customerName||'散客'} · {r.paymentMethod||'未記錄'}<br/>{(r.items||[]).map(x=>x.name+' '+formatCurrency(lineTotal(x))).join('、')}</div>)}</details>}<label className="block">修改原因<input aria-label="修改原因" className="input-field" value={editReason} onChange={e=>setEditReason(e.target.value)} placeholder="例如：折扣輸入錯誤"/></label><p className="text-sm text-slate-500">此處修正帳務，不代表已補收或退差額。移除商品項目會回補庫存，僅適用誤加或已退回可販售的商品。整筆退款請取消返回，使用「作廢」。</p><div className="border-t pt-4 flex justify-between items-center"><div className="text-xl font-black text-slate-800">總計: {formatCurrency(form.total)}</div><div className="flex gap-2"><button onClick={onClose} className="btn btn-secondary">取消</button><button onClick={()=>onSave(form,editReason)} className="btn btn-primary">儲存修正</button></div></div>
             </div>
         </Modal>
     );
@@ -1638,6 +1679,10 @@ const localDate=value=>localDateTime(value).slice(0,10);
 function validateStored(key,value) {
  if(key==='salon_offline_settings') {
   if(!value || typeof value!=='object' || Array.isArray(value))throw Error('設定格式錯誤');
+  if(value.voidedOrders!==undefined){
+   if(!Array.isArray(value.voidedOrders)||value.voidedOrders.some(o=>!o||!o.id)||new Set(value.voidedOrders.map(o=>o.id)).size!==value.voidedOrders.length)throw Error('作廢紀錄格式或編號錯誤');
+   for(const o of value.voidedOrders){const r=o.refund;if(!r)continue;if(!['pending','paid','notCollected','notRequired'].includes(r.status)||!Number.isFinite(r.amount)||r.amount<0||r.amount!==money(Number(o.total))||(r.status==='notRequired'&&r.amount!==0)||(r.status==='paid'&&(!r.method||!Number.isFinite(new Date(r.paidAt).getTime()))))throw Error('作廢退款紀錄金額或狀態錯誤');}
+  }
   if(value.branches!==undefined){if(!Array.isArray(value.branches)||!value.branches.length||value.branches.some(b=>!b||typeof b.id!=='string'||!b.id||typeof b.name!=='string'||!b.name.trim())||new Set(value.branches.map(b=>b.id)).size!==value.branches.length)throw Error('分店設定格式錯誤');if(value.activeBranchId&&!value.branches.some(b=>b.id===value.activeBranchId))throw Error('營業分店不存在');}
   if(value.salarySlips!==undefined){if(!Array.isArray(value.salarySlips)||value.salarySlips.some(s=>!s||!s.id||!s.staffId||!periodBounds('month',s.month)||!Array.isArray(s.rows)||!Array.isArray(s.advanceIds)||!Array.isArray(s.chargeIds)||!Array.isArray(s.workIds)||!Array.isArray(s.transactionIds)||!s.report||!s.report.totals||![s.gross,s.advance,s.charge,s.net].every(Number.isFinite)||s.net!==money(s.gross-s.advance-s.charge)||s.gross!==money(s.rows.reduce((n,r)=>n+Number(r.amount),0)))||new Set(value.salarySlips.map(s=>s.id)).size!==value.salarySlips.length)throw Error('薪資條格式或金額錯誤');const active=value.salarySlips.filter(s=>!s.voidedAt);if(new Set(active.map(s=>s.staffId+':'+s.month)).size!==active.length)throw Error('薪資月份重複');}
   if(value.workLogs!==undefined){if(!Array.isArray(value.workLogs)||value.workLogs.some(r=>!r||typeof r.id!=='string'||!r.id||!r.staffId||!r.branchId||typeof r.date!=='string'||localDate(r.date+'T12:00:00')!==r.date||!Number.isFinite(r.hours)||r.hours<=0||r.hours>24||!Number.isFinite(r.hourlyRate)||r.hourlyRate<0||r.basePay!==money(r.hours*r.hourlyRate))||new Set(value.workLogs.map(r=>r.id)).size!==value.workLogs.length)throw Error('工時紀錄格式或金額錯誤');}
@@ -1933,7 +1978,7 @@ function OptionManager({field,title,colorField}) {
                         <nav className="flex-1 p-4 space-y-2">
                             {[ {id:'pos', icon:CreditCard, label:'收銀開單'}, {id:'orders', icon:ClipboardList, label:'查單管理'}, {id:'report', icon:Activity, label:'營運報表'}, {id:'customers', icon:User, label:'顧客資料'}, {id:'staff', icon:UserCog, label:'人員管理'}, {id:'salary',icon:Banknote,label:'薪資條'}, {id:'inventory', icon:Box, label:'商品庫存'}, {id:'settings', icon:Settings, label:'店家設定'} ].map(item=>(<button key={item.id} onClick={()=>setActiveTab(item.id)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all font-bold ${activeTab===item.id?'bg-indigo-50 text-indigo-600':'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}><item.icon size={20}/>{item.label}</button>))}
                         </nav>                 
-                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.4 開單測試版</div>
+                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.5 查單測試版</div>
                     </aside>
                     
                     {/* 手機版全螢幕選單 */}
