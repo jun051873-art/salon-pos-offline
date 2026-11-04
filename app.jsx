@@ -198,6 +198,25 @@ function confirmedPayroll(item) {
  if(!p||p.version!==1||p.stylistId!==(item.stylistId||''))return null;
  try {const check=calculatePayroll(item,p.policy,p.helpers||[]);for(const k of ['gross','material','helperTotal','actual','commission','shopShare'])if(!Number.isFinite(p[k])||Math.abs(check[k]-p[k])>0.009)return null;return p;}catch(e){return null;}
 }
+// Checkout rechecks parked drafts against the current catalogue; never clamp shortages.
+function checkoutInventory(items,services) {
+ const required=new Map();
+ for(const item of items){
+  const live=services.find(s=>s.id===item.id);
+  if(!live||live.archivedAt)throw Error('「'+item.name+'」已停用或刪除，請移除後重新選擇');
+  if(live.isInternal||live.productUse==='internal')throw Error('「'+item.name+'」為店用消耗，請改從庫存領用');
+  if(!!live.isProduct!==!!item.isProduct)throw Error('「'+item.name+'」的項目類型已變更，請移除後重新加入');
+  if(item.isProduct)required.set(item.id,(required.get(item.id)||0)+1);
+ }
+ return services.map(service=>{
+  const count=required.get(service.id)||0;
+  if(!count||service.stock==null)return service;
+  const stock=Number(service.stock);
+  if(!Number.isSafeInteger(stock)||stock<0)throw Error('「'+service.name+'」庫存數量異常，請先到商品庫存修正');
+  if(stock<count)throw Error('「'+service.name+'」庫存不足：需要 '+count+'，目前剩 '+stock+'，請調整開單項目');
+  return {...service,stock:stock-count};
+ });
+}
 function preparePayrollItems(items,settings,stylists) {
  return items.map(item=>{
   const stylist=stylists.find(s=>s.id===item.stylistId);
@@ -702,13 +721,14 @@ const {safeStylists:allStylists,safeSettings,getThemeClasses,showToast,safeCusto
                 return items;
             }, [safeServices, selectedCategory, serviceSearch]);
 
-            const cartTotal = useMemo(() => cart.reduce((sum, item) => sum + lineTotal(item), 0), [cart]);
+            const cartTotal = useMemo(() => money(cart.reduce((sum, item) => sum + money(lineTotal(item)), 0)), [cart]);
 
             const addToCart = (service) => {
-                if(service.productUse==='internal')return showToast('店用消耗請從庫存領用','error');
-                if (service.isProduct && service.stock !== null) {
+                if(service.isInternal||service.productUse==='internal')return showToast('店用消耗請從庫存領用','error');
+                if(!safeStylists.some(s=>s.id===selectedStylist))return showToast('請先選擇有效的設計師，再加入項目','error');
+                if (service.isProduct && service.stock != null) {
                     const inCart = cart.filter(i => i.id === service.id).length;
-                    if ((service.stock - inCart) <= 0) { showToast('庫存不足！', 'error'); return; }
+                    if (!Number.isSafeInteger(Number(service.stock)) || (service.stock - inCart) <= 0) { showToast('庫存不足！', 'error'); return; }
                 }
                 const stylistObj = safeStylists.find(s => s.id === selectedStylist);
 
@@ -766,8 +786,8 @@ const {safeStylists:allStylists,safeSettings,getThemeClasses,showToast,safeCusto
                 if (!safeSettings.paymentMethods.includes(paymentMethod)) return showToast('付款方式已停用','error');
 
                 if (cart.some(i=>!validLine(i))) return showToast('金額須為非負數，折扣不得超過售價','error');
-                const required = {}; cart.filter(i=>i.isProduct).forEach(i=>required[i.id]=(required[i.id]||0)+1);
-                for (const [id,qty] of Object.entries(required)) { const product=safeServices.find(s=>s.id===id); if (!product || (product.stock!==null && Number(product.stock)<qty)) return showToast('商品庫存不足，請調整開單項目','error'); }
+                let updatedServices;
+                try {updatedServices=checkoutInventory(cart,safeServices);}catch(e){showToast(e.message,'error');return;}
                 checkoutLock.current=true;
                 
                const finalCustName = selectedCustomer ? selectedCustomer.name : (adHocCustomerName || '散客');
@@ -790,16 +810,9 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
                     createdAt: new Date().toISOString() 
                 };
 
-                const updatedServices = safeServices.map(s => {
-                    const cartItems = cart.filter(i => i.id === s.id);
-                    if (s.isProduct && s.stock !== null && cartItems.length > 0) { 
-                        return { ...s, stock: Math.max(0, s.stock - cartItems.length) }; 
-                    }
-                    return s;
-                });
-                const newLogs = cart.filter(i=>i.isProduct).map(i=>({ id: generateId(), date: new Date().toISOString(), type: '銷售', itemName: i.name, qty: 1, cost: i.cost, note: `訂單 #${newOrder.id.slice(0,6)}`, operator: 'System' }));
+                const newLogs = accountedItems.filter(i=>i.isProduct).map(i=>({ id: generateId(), date: newOrder.date, createdAt:newOrder.createdAt, type: '銷售', itemId:i.id, itemName: i.name, orderId:newOrder.id, branchId:checkoutBranch, qty: 1, cost: i.cost, note: `訂單 #${newOrder.id.slice(0,6)}`, operator: i.stylistName || '未指定' }));
                 const updatedCustomers = safeCustomers.map(c=>c.id===finalCustId ? {...c,visits:normalizeCustomer(c).visits+1,totalSpend:money(normalizeCustomer(c).totalSpend+cartTotal)}:c);
-                const nextSnapshot = {services:updatedServices,stylists:safeStylists,customers:updatedCustomers,transactions:[newOrder,...safeTransactions],settings:safeSettings,inventoryLogs:[...newLogs,...safeInventoryLogs],expenses:safeExpenses,pendingOrders:safePendingOrders};
+                const nextSnapshot = {services:updatedServices,stylists:allStylists,customers:updatedCustomers,transactions:[newOrder,...safeTransactions],settings:safeSettings,inventoryLogs:[...newLogs,...safeInventoryLogs],expenses:safeExpenses,pendingOrders:safePendingOrders};
                 try { persistSnapshot(nextSnapshot, {}); } catch(e) { checkoutLock.current=false; showToast('尚未完成結帳：'+e.message,'error'); return; }
                 setShowCheckout(false);
                 setTimeout(()=>{checkoutLock.current=false;},300);
@@ -856,7 +869,7 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
                                     <div>整單負責人：<span className="font-bold text-slate-700">{safeStylists.find(s=>s.id===cart[0]?.stylistId)?.name || '未指定'}</span></div>
                                 </div>
                                 <div className="space-y-2 pt-2">
-                                    <label className="text-xs font-bold text-slate-400 text-left block">請選擇付款方式</label>
+                                    <label className="text-xs font-bold text-slate-400 text-left block">已收到款項後，點選付款方式完成結帳</label>
                                    <div className="grid grid-cols-2 gap-2">
     {/* 定義支付方式與顏色對照 */}
     {safeSettings.paymentMethods.map((name, idx) => ({ name, color: getThemeClasses(safeSettings.paymentColors[name] || ['amber','violet','red','emerald','blue'][idx%5], 'badge'), unusedColor: ['bg-amber-100 text-amber-900 border-amber-200','bg-violet-100 text-violet-900 border-violet-200','bg-red-100 text-red-900 border-red-200','bg-emerald-100 text-emerald-900 border-emerald-200','bg-blue-100 text-blue-900 border-blue-200'][idx % 5] })).map((item) => (
@@ -881,6 +894,7 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
                     {/* 左側主面板：搜尋與項目選單 */}
                     <div className="pos-services flex-1 flex flex-col bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                         <div className="p-4 border-b space-y-3 bg-white"><div className="service-tools"><input aria-label="搜尋服務或商品" className="input-field" placeholder="搜尋服務或商品…" value={serviceSearch} onChange={e=>setServiceSearch(e.target.value)}/><label className="stylist-picker">設計師<select className="input-field py-2" value={selectedStylist} onChange={handleMainStylistChange}>
+                                        {!safeStylists.some(s=>s.id===selectedStylist)&&<option value="">請選擇設計師</option>}
                                         {safeStylists.map(s => <option key={s.id} value={s.id} disabled={!!s.archivedAt}>{s.name}{s.archivedAt?'（已停用）':''}</option>)}
                                     </select></label></div>
                             <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">{['全部', ...safeSettings.categories].map(c => (<button key={c} onClick={()=>setSelectedCategory(c)} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap border transition-all ${selectedCategory===c?'bg-slate-800 text-white border-slate-800 shadow-md':'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>{c}</button>))}</div>
@@ -932,7 +946,7 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
         <div key={item.cartId || idx} className={`p-3 border border-slate-200 rounded-xl relative group bg-white border-l-4 ${itemBorderClass}`}>
             <div className="flex justify-between font-bold text-sm mb-1">
                 <span className="text-slate-800">{item.name}<small className="block text-slate-500 font-normal mt-1">{item.stylistName||'未指定'}{itemHelpers(item,item.payrollPolicy||resolvePayrollPolicy(item,safeSettings)).length>0&&' · 協助：'+itemHelpers(item,item.payrollPolicy||resolvePayrollPolicy(item,safeSettings)).map(h=>h.name).join('、')}</small></span>
-                <span className="text-slate-700 font-black font-mono">{formatCurrency(item.price)}</span>
+                <span className="text-slate-700 font-black font-mono">{formatCurrency(lineTotal(item))}{Number(item.discount)>0&&<small className="block text-slate-500 font-normal">已折 {formatCurrency(item.discount)}</small>}</span>
             </div>
             
             <div className="flex justify-end gap-2 mt-2">
@@ -940,6 +954,7 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
                 {/* 絕對不會閃跳的修改金額按鈕 */}
                 <button 
                     type="button"
+                    aria-label={`修改 ${item.name} 售價`}
                     className="p-1.5 text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100"
                     onClick={(e) => {
                         e.preventDefault();
@@ -947,9 +962,9 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
                         const val = prompt('請輸入新售價:', item.price);
                         if (val !== null && val.trim() !== '') {
                             const newPrice = Number(val);
-                            if (Number.isFinite(newPrice) && newPrice >= 0) {
+                            if (Number.isFinite(newPrice) && newPrice >= Number(item.discount||0)) {
                                 setCart(prev => prev.map(c => c.cartId === item.cartId ? { ...c, price: newPrice } : c));
-                            }
+                            } else {showToast('售價需為有效金額，且不得低於折扣','error');}
                         }
                     }}
                 >
@@ -959,6 +974,7 @@ const finalGender = selectedCustomer ? selectedCustomer.gender : adHocGender;
                 {/* 絕對不會閃跳的刪除按鈕 */}
                 <button 
                     type="button"
+                    aria-label={`移除 ${item.name}`}
                     className="p-1.5 text-red-600 bg-red-50 rounded-lg hover:bg-red-100"
                     onClick={(e) => {
                         e.preventDefault();
@@ -1917,7 +1933,7 @@ function OptionManager({field,title,colorField}) {
                         <nav className="flex-1 p-4 space-y-2">
                             {[ {id:'pos', icon:CreditCard, label:'收銀開單'}, {id:'orders', icon:ClipboardList, label:'查單管理'}, {id:'report', icon:Activity, label:'營運報表'}, {id:'customers', icon:User, label:'顧客資料'}, {id:'staff', icon:UserCog, label:'人員管理'}, {id:'salary',icon:Banknote,label:'薪資條'}, {id:'inventory', icon:Box, label:'商品庫存'}, {id:'settings', icon:Settings, label:'店家設定'} ].map(item=>(<button key={item.id} onClick={()=>setActiveTab(item.id)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all font-bold ${activeTab===item.id?'bg-indigo-50 text-indigo-600':'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}><item.icon size={20}/>{item.label}</button>))}
                         </nav>                 
-                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.3 外觀測試版</div>
+                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.4 開單測試版</div>
                     </aside>
                     
                     {/* 手機版全螢幕選單 */}

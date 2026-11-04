@@ -1,8 +1,8 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('fs'),os=require('os'),path=require('path'),es=require('esbuild');
 const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'salon-import-'));
 const source=fs.readFileSync(__dirname+'/../app.jsx','utf8').replace(/    const root = ReactDOM.createRoot[\s\S]*$/,'');
-es.buildSync({stdin:{contents:'import React from "react"; import {createBusinessStore,STORE_KEY} from "./business-store.js";\n'+source+'\nexport {validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll};',loader:'jsx',resolveDir:path.resolve(__dirname,'..')},bundle:true,platform:'node',format:'cjs',outfile:scratch+'/validator.cjs',nodePaths:[process.env.SALON_NODE_MODULES||path.resolve(__dirname,'../node_modules')]});
-const {validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll}=require(scratch+'/validator.cjs');
+es.buildSync({stdin:{contents:'import React from "react"; import {createBusinessStore,STORE_KEY} from "./business-store.js";\n'+source+'\nexport {validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll,checkoutInventory};',loader:'jsx',resolveDir:path.resolve(__dirname,'..')},bundle:true,platform:'node',format:'cjs',outfile:scratch+'/validator.cjs',nodePaths:[process.env.SALON_NODE_MODULES||path.resolve(__dirname,'../node_modules')]});
+const {validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll,checkoutInventory}=require(scratch+'/validator.cjs');
 const basic=()=>({services:[{id:'cut',name:'測試剪髮',price:600,category:'剪髮',isProduct:false}],stylists:[{id:'staff',name:'測試人員'}],customers:[],transactions:[{id:'order',date:'2026-10-15T04:00:00.000Z',items:[{id:'cut',name:'測試剪髮',category:'剪髮',price:600,stylistId:'staff'}],total:600}],settings:{},pendingOrders:[],inventoryLogs:[],expenses:[]});
 test('legacy null, missing, and empty drafts restore as empty without changing caller',()=>{for(const draft of [null,undefined,{}]){const input={...basic(),draft},before=JSON.stringify(input);const result=validateBackup(input);assert.deepEqual(result.draft,{});assert.equal(result.transactions[0].total,600);assert.equal(JSON.stringify(input),before);}});
 test('invalid nonempty draft and invalid amounts still rejected',()=>{for(const draft of ['',[],42,{cart:'wrong'},{cart:[{id:'cut',name:'測試',price:-1}]}])assert.throws(()=>validateBackup({...basic(),draft}));const invalid=basic();invalid.transactions[0].total=999;assert.throws(()=>validateBackup(invalid),/總額/);});
@@ -23,3 +23,12 @@ test('private backup integrity, persisted roundtrip and application pages',{skip
 
 test('appearance whitelist removes private, cloud and payment fields even when nested in input',()=>{const input={shopName:'PRIVATE',customers:[{name:'PRIVATE'}],paymentMethods:['PRIVATE'],cloudKey:'PRIVATE',appearance:{accent:'#123456',fontSize:18,customers:['PRIVATE'],firebaseConfig:{apiKey:'PRIVATE'},walletLedger:['PRIVATE']}};const style=appearanceExport(input);assert(!JSON.stringify(style).includes('PRIVATE'));assert.equal(style.appearance.accent,'#123456');const imported=appearanceImport({...style,transactions:['PRIVATE'],appearance:{...style.appearance,password:'PRIVATE',opacity:1000,columns:999}});assert(!JSON.stringify(imported).includes('PRIVATE'));assert.equal(imported.opacity,100);assert.equal(imported.columns,3);assert.throws(()=>appearanceImport({settings:input}));assert.deepEqual(appearanceImport(style),style.appearance);});
 test('service accounting remains 2000 minus 400 minus 100 with 750 commission',()=>{const r=calculatePayroll({id:'synthetic-dye',name:'測試染髮',price:2000,discount:0,stylistId:'synthetic-staff'},{materialMode:'percent',materialValue:20,commissionRate:50},[{id:'synthetic-helper',mode:'fixed',base:'gross',value:100}]);assert.equal(r.gross,2000);assert.equal(r.material,400);assert.equal(r.actual,1500);assert.equal(r.commission,750);});
+
+ test('checkout stock revalidation rejects shortages and changed catalogue without mutation',()=>{
+ const services=[{id:'p',name:'測試商品',isProduct:true,stock:1}],items=[{id:'p',name:'測試商品',isProduct:true}];
+ const before=JSON.stringify(services);assert.equal(checkoutInventory(items,services)[0].stock,0);assert.equal(JSON.stringify(services),before);
+ assert.throws(()=>checkoutInventory([...items,...items],services),/庫存不足/);
+ for(const extra of [{archivedAt:'2026-11-04'},{productUse:'internal'},{isProduct:false},{stock:'bad'},{stock:0.5}])assert.throws(()=>checkoutInventory(items,[{...services[0],...extra}]));
+ assert.throws(()=>checkoutInventory(items,[]),/停用或刪除/);
+ for(const stock of [null,undefined])assert.equal(checkoutInventory(items,[{...services[0],stock}])[0].stock,stock);
+ });
