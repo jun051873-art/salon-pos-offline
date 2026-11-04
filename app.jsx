@@ -1,3 +1,8 @@
+function filterOrderRecords(records,bounds,branch='all',stylist='all',search=''){
+ const q=String(search).trim().toLocaleLowerCase();
+ return records.filter(t=>inPeriod(localDate(t.date),bounds)&&branchMatch(t,branch)&&(stylist==='all'||t.mainStylistId===stylist||(t.items||[]).some(i=>i.stylistId===stylist||(i.payroll?.helpers||[]).some(h=>h.id===stylist)))&&(!q||[t.customerName,t.id].some(v=>String(v||'').toLocaleLowerCase().includes(q)))).sort((a,b)=>new Date(b.date)-new Date(a.date));
+}
+
 // Read-only refund reporting: never writes orders, expenses or balances.
 function refundReportData(settings,bounds,branch='all'){
  const records=[...(settings.productReturns||[]).map(r=>({...r,key:'product:'+r.id,kind:'商品退貨',eventAt:r.createdAt})),...(settings.voidedOrders||[]).map(o=>({key:'void:'+o.id,kind:'整單作廢',orderId:o.id,orderDate:o.date,branchId:o.branchId,customerName:o.customerName,items:o.items||[],reason:o.voidReason,eventAt:o.voidedAt,...(o.refund||{status:'unknown',amount:o.total})}))].filter(r=>branchMatch(r,branch));
@@ -1401,33 +1406,11 @@ const {safeTransactions,confirmAction,transactions,customers,setCustomers,safeSe
                 const [filterStylist, setFilterStylist] = useState('all');
                 const [filterBranch,setFilterBranch]=useState('all');
 
-               const handleModeChange = (mode) => {
-    setDateMode(mode);
-    const now = new Date();
-    // 解決時區偏移問題的輔助函數
-    const getFormattedDate = (type) => {
-        const offset = now.getTimezoneOffset();
-        const localDate = new Date(now.getTime() - (offset * 60 * 1000));
-        if (type === 'month') return localDate.toISOString().slice(0, 7); // YYYY-MM
-        return localDate.toISOString().slice(0, 10); // YYYY-MM-DD
-    };
-
-    setQueryDate(getFormattedDate(mode));
-};
-
-                const filteredOrders = useMemo(() => {
-                    return safeTransactions.filter(t => {
-                        const txDate = localDate(t.date);
-                        let matchDate = true;
-                        if (dateMode === 'month') matchDate = txDate.startsWith(queryDate);
-                        else matchDate = txDate === queryDate;
-
-                        const matchSearch = searchTerm ? ((t.customerName && t.customerName.includes(searchTerm)) || (t.id && t.id.includes(searchTerm))) : true;
-                        const matchStylist = filterStylist === 'all' || t.mainStylistId === filterStylist || (t.items||[]).some(i=>i.stylistId===filterStylist||(i.payroll?.helpers||[]).some(h=>h.id===filterStylist));
-
-                        return matchDate && matchSearch && matchStylist && branchMatch(t,filterBranch);
-                    }).sort((a,b) => new Date(b.date) - new Date(a.date));
-                }, [safeTransactions, queryDate, searchTerm, dateMode, filterStylist, filterBranch]);
+ const [endDate,setEndDate]=useState(getCurrentDateLocal());
+ const handleModeChange=mode=>{setDateMode(mode);setQueryDate(getCurrentDateLocal().slice(0,mode==='month'?7:10));setEndDate(getCurrentDateLocal());};
+ const orderBounds=periodBounds(dateMode==='date'?'day':dateMode,queryDate,endDate);
+ const filteredOrders=filterOrderRecords(safeTransactions,orderBounds,filterBranch,filterStylist,searchTerm);
+ const filteredVoids=filterOrderRecords(safeSettings.voidedOrders||[],orderBounds,filterBranch,filterStylist,searchTerm);
 
 const [productReturnOrder,setProductReturnOrder]=useState(null);
 const saveProductReturn=(ids,reason)=>{try{commitTables(returnProductData(productReturnOrder.id,productReturnOrder,ids,reason,orderContext()));setProductReturnOrder(null);showToast('退貨已保存；請在原單退貨紀錄登記退款');}catch(e){showToast(e.message,'error');}};
@@ -1517,17 +1500,17 @@ const groups=Object.values(filteredOrders.reduce((acc,t)=>{const id=t.mainStylis
                             <div className="order-filters">
                                 <div className="flex gap-1 bg-white p-1 rounded-lg border border-slate-300">
                                     <button onClick={() => handleModeChange('month')} className={`px-3 py-1 text-sm rounded-md transition-colors ${dateMode==='month' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>月</button>
-                                    <button onClick={() => handleModeChange('date')} className={`px-3 py-1 text-sm rounded-md transition-colors ${dateMode==='date' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>日</button>
+                                    <button onClick={() => handleModeChange('date')} className={`px-3 py-1 text-sm rounded-md transition-colors ${dateMode==='date' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>日</button><button onClick={()=>handleModeChange('range')} aria-pressed={dateMode==='range'} className={'px-3 py-1 text-sm rounded-md '+(dateMode==='range'?'bg-slate-800 text-white':'text-slate-600')}>日期區間</button>
                                 </div>
-                                <input type={dateMode} className="input-field w-auto font-bold" value={queryDate} onChange={e=>setQueryDate(e.target.value)}/>
+                                <input aria-label="查單開始日期" type={dateMode==='month'?'month':'date'} className="input-field w-auto font-bold" value={queryDate} onChange={e=>setQueryDate(e.target.value)}/>{dateMode==='range'&&<><span>至</span><input aria-label="查單結束日期" type="date" className="input-field w-auto font-bold" value={endDate} onChange={e=>setEndDate(e.target.value)}/></>}
                                 <BranchSelect settings={safeSettings} value={filterBranch} onChange={setFilterBranch} all /><select className="input-field w-32 font-bold" value={filterStylist} onChange={(e) => setFilterStylist(e.target.value)}>
                                     <option value="all">全體人員</option>
                                     {safeStylists.map(s => (<option key={s.id} value={s.id}>{s.name}</option>))}
                                 </select>
-<div className="relative"><Search className="absolute left-3 top-3 text-slate-400" size={18}/><input type="text" className="input-field pl-10" placeholder="搜尋..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}/></div>                            </div>
+<div className="relative"><Search className="absolute left-3 top-3 text-slate-400" size={18}/><input type="text" className="input-field pl-10" placeholder="搜尋客名或單號" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}/></div>                            </div>
                         </div>
 
-<div className="order-summary">共 {filteredOrders.length} 單 · 單據金額 {formatCurrency(filteredOrders.reduce((n,t)=>n+Number(t.total||0),0))}</div>
+{!orderBounds&&<p role="alert" className="report-warning">請選擇有效日期，開始日期不可晚於結束日期。</p>}<div className="order-summary">共 {filteredOrders.length} 單 · 單據金額 {formatCurrency(filteredOrders.reduce((n,t)=>n+Number(t.total||0),0))}</div>
 {dateMode==='date'&&filterStylist==='all'?<><p className="group-note">依整單負責人分欄；共同服務人員列於單內，每筆訂單只計一次。</p><div className="designer-board">{groups.map(g=><section key={g.id} className="designer-column"><header><strong>{g.name}</strong><span>{g.orders.length} 單 · 服務 {formatCurrency(g.orders.reduce((n,t)=>n+(t.items||[]).filter(i=>!i.isProduct).reduce((sum,i)=>sum+lineTotal(i),0),0))}<small>單據金額 {formatCurrency(g.orders.reduce((n,t)=>n+Number(t.total||0),0))}</small></span></header><div>{g.orders.map(renderOrder)}</div></section>)}</div></>:<div className="order-grid">{filteredOrders.map(renderOrder)}</div>}
 {filteredOrders.length === 0 && (
                             <div className="text-center py-20 bg-white rounded-xl border border-dashed text-slate-400 flex flex-col items-center gap-2">
@@ -1536,7 +1519,7 @@ const groups=Object.values(filteredOrders.reduce((acc,t)=>{const id=t.mainStylis
                             </div>
                         )}
 
-                        <details className="card p-4 mt-5"><summary>作廢訂單紀錄</summary>{(safeSettings.voidedOrders||[]).filter(t=>localDate(t.date).startsWith(queryDate)&&branchMatch(t,filterBranch)&&(filterStylist==='all'||t.mainStylistId===filterStylist)).map(t=><div className="consumption-row" key={t.id}><span>{localDate(t.date)} · {t.customerName} · {formatCurrency(t.total)}</span><span>{t.voidReason} · 作廢於 {localDate(t.voidedAt)}<small className="block">{({pending:'待退款',paid:'已全額退款',notCollected:'實際未收款',notRequired:'零元，無須退款'})[t.refund?.status]||'舊單：退款狀態未核對'}{t.refund?.paidAt&&' · '+localDate(t.refund.paidAt)+' · '+t.refund.method}</small></span>{(safeSettings.productReturns||[]).filter(r=>r.orderId===t.id).map(renderProductReturn)}{t.refund?.status==='pending'&&<button className="btn btn-secondary" onClick={()=>markRefund(t)}>登記已退款</button>}</div>)}</details>{refundTarget&&<Modal title="登記已退款" onClose={()=>setRefundTarget(null)}><div className="space-y-4"><p>確認已實際退還 {formatCurrency(refundTarget.total)} 給 {refundTarget.customerName||'散客'}。這項操作只登記款項，不會再回補庫存或重扣業績。</p><label className="block">退款方式<select aria-label="退款方式" className="input-field" value={refundMethod} onChange={e=>setRefundMethod(e.target.value)}>{safeSettings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label><button className="btn btn-primary w-full" onClick={saveRefund}>確認已實際退款</button></div></Modal>}{productReturnOrder&&<ProductReturnModal order={productReturnOrder} onClose={()=>setProductReturnOrder(null)} onSave={saveProductReturn}/>}{voidingOrder&&<VoidOrderModal order={voidingOrder} settings={safeSettings} onClose={()=>setVoidingOrder(null)} onSave={saveVoid}/>}{editingOrder && <EditOrderModal order={editingOrder} onClose={()=>setEditingOrder(null)} onSave={handleUpdateOrder}/>}
+                        <details className="card p-4 mt-5"><summary>作廢訂單紀錄（{filteredVoids.length} 筆）</summary><p className="report-footnote">依原單日期、客名／單號與人員篩選。</p>{!filteredVoids.length&&<p>此條件沒有作廢紀錄。</p>}{filteredVoids.map(t=><div className="consumption-row" key={t.id}><span>{localDate(t.date)} · {t.customerName} · {formatCurrency(t.total)}</span><span>{t.voidReason} · 作廢於 {localDate(t.voidedAt)}<small className="block">{({pending:'待退款',paid:'已全額退款',notCollected:'實際未收款',notRequired:'零元，無須退款'})[t.refund?.status]||'舊單：退款狀態未核對'}{t.refund?.paidAt&&' · '+localDate(t.refund.paidAt)+' · '+t.refund.method}</small></span>{(safeSettings.productReturns||[]).filter(r=>r.orderId===t.id).map(renderProductReturn)}{t.refund?.status==='pending'&&<button className="btn btn-secondary" onClick={()=>markRefund(t)}>登記已退款</button>}</div>)}</details>{refundTarget&&<Modal title="登記已退款" onClose={()=>setRefundTarget(null)}><div className="space-y-4"><p>確認已實際退還 {formatCurrency(refundTarget.total)} 給 {refundTarget.customerName||'散客'}。這項操作只登記款項，不會再回補庫存或重扣業績。</p><label className="block">退款方式<select aria-label="退款方式" className="input-field" value={refundMethod} onChange={e=>setRefundMethod(e.target.value)}>{safeSettings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label><button className="btn btn-primary w-full" onClick={saveRefund}>確認已實際退款</button></div></Modal>}{productReturnOrder&&<ProductReturnModal order={productReturnOrder} onClose={()=>setProductReturnOrder(null)} onSave={saveProductReturn}/>}{voidingOrder&&<VoidOrderModal order={voidingOrder} settings={safeSettings} onClose={()=>setVoidingOrder(null)} onSave={saveVoid}/>}{editingOrder && <EditOrderModal order={editingOrder} onClose={()=>setEditingOrder(null)} onSave={handleUpdateOrder}/>}
                     </div>
                 );
             };
@@ -1615,7 +1598,7 @@ const {setCustomers,safeCustomers,showToast,safeSettings,safeStylists}=React.use
                     </div>
                 </div>
                 <details className="border-t pt-4"><summary className="font-bold cursor-pointer">業績與抽成明細（依原單制度）</summary><div className="space-y-4 mt-4">{form.items.map(item=>{let ledger,error;try{ledger=item.payroll?calculatePayroll(item,item.payroll.policy,item.payroll.helpers):null;}catch(e){error=e.message;}return <section key={item.cartId} className="border rounded-xl p-3"><h4 className="font-bold mb-2">{item.name}</h4>{error?<p className="payroll-error">{error}</p>:<PayrollBreakdown item={item} ledger={ledger}/>}</section>;})}</div></details>
-                {(order.revisionHistory||[]).length>0&&<details><summary>修改紀錄（{order.revisionHistory.length} 次）</summary>{order.revisionHistory.map((r,i)=><div className="border-t py-3 text-sm" key={i}>{localDateTime(r.at).replace('T',' ')} · {r.reason}<br/>修改前 {formatCurrency(r.total)} · {r.customerName||'散客'} · {r.paymentMethod||'未記錄'}<br/>{(r.items||[]).map(x=>x.name+' '+formatCurrency(lineTotal(x))).join('、')}</div>)}</details>}<label className="block">修改原因<input aria-label="修改原因" className="input-field" value={editReason} onChange={e=>setEditReason(e.target.value)} placeholder="例如：折扣輸入錯誤"/></label><p className="text-sm text-slate-500">此處修正帳務，不代表已補收或退差額。移除商品項目會回補庫存，僅適用誤加或已退回可販售的商品。整筆退款請取消返回，使用「作廢」。</p><div className="border-t pt-4 flex justify-between items-center"><div className="text-xl font-black text-slate-800">總計: {formatCurrency(form.total)}</div><div className="flex gap-2"><button onClick={onClose} className="btn btn-secondary">取消</button><button onClick={()=>onSave(form,editReason)} className="btn btn-primary">儲存修正</button></div></div>
+                {(order.revisionHistory||[]).length>0&&<details><summary>修改紀錄（{order.revisionHistory.length} 次）</summary>{order.revisionHistory.map((r,i)=><div className="border-t py-3 text-sm" key={i}>{localDateTime(r.at).replace('T',' ')} · {r.reason}<br/>修改前 {formatCurrency(r.total)} · {r.customerName||'散客'} · {r.paymentMethod||'未記錄'}<br/>{(r.items||[]).map(x=>x.name+' '+formatCurrency(lineTotal(x))).join('、')}</div>)}</details>}<p className="rounded-xl bg-slate-50 p-3 text-sm" data-testid="revision-preview">原單 {formatCurrency(order.total)} → 修正後 {formatCurrency(form.total)}{money(form.total-order.total)!==0&&<strong className="block mt-1">差額 {formatCurrency(Math.abs(form.total-order.total))}（{form.total>order.total?'增加':'減少'}）· 尚未登記實際補收／退款</strong>}</p><label className="block">修改原因<input aria-label="修改原因" className="input-field" value={editReason} onChange={e=>setEditReason(e.target.value)} placeholder="例如：折扣輸入錯誤"/></label><p className="text-sm text-slate-500">此處修正帳務，不代表已補收或退差額。移除商品項目會回補庫存，僅適用誤加或已退回可販售的商品。整筆退款請取消返回，使用「作廢」。</p><div className="border-t pt-4 flex justify-between items-center"><div className="text-xl font-black text-slate-800">總計: {formatCurrency(form.total)}</div><div className="flex gap-2"><button onClick={onClose} className="btn btn-secondary">取消</button><button onClick={()=>onSave(form,editReason)} className="btn btn-primary">儲存修正</button></div></div>
             </div>
         </Modal>
     );
@@ -2034,7 +2017,7 @@ function OptionManager({field,title,colorField}) {
                         <nav className="flex-1 p-4 space-y-2">
                             {[ {id:'pos', icon:CreditCard, label:'收銀開單'}, {id:'orders', icon:ClipboardList, label:'查單管理'}, {id:'report', icon:Activity, label:'營運報表'}, {id:'customers', icon:User, label:'顧客資料'}, {id:'staff', icon:UserCog, label:'人員管理'}, {id:'salary',icon:Banknote,label:'薪資條'}, {id:'inventory', icon:Box, label:'商品庫存'}, {id:'settings', icon:Settings, label:'店家設定'} ].map(item=>(<button key={item.id} onClick={()=>setActiveTab(item.id)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all font-bold ${activeTab===item.id?'bg-indigo-50 text-indigo-600':'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}><item.icon size={20}/>{item.label}</button>))}
                         </nav>                 
-                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.7 退款報表測試版</div>
+                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.8 查單改單測試版</div>
                     </aside>
                     
                     {/* 手機版全螢幕選單 */}
