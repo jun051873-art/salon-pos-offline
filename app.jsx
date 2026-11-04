@@ -1,9 +1,48 @@
+function returnProductData(orderId,expected,selectedIds,reason,c){
+ const order=c.safeTransactions.find(t=>t.id===orderId);assertOrderUnchanged(expected,order);
+ if(!reason?.trim())throw Error('請填寫退貨原因');
+ if(salaryOrderLocked(c.safeSettings,order))throw Error('訂單月份薪資已確認，不能直接退貨');
+ if(!Array.isArray(selectedIds)||!selectedIds.length||new Set(selectedIds).size!==selectedIds.length)throw Error('請選擇退回商品，不能重複');
+ const lines=order.items.map((i,n)=>({...i,cartId:i.cartId||('legacy-line-'+n)}));
+ if(new Set(lines.map(i=>i.cartId)).size!==lines.length)throw Error('原單項目編號重複，請先核對');
+ const selected=selectedIds.map(id=>lines.find(i=>i.cartId===id));
+ if(selected.some(i=>!i||!i.isProduct||!validLine(i)))throw Error('選取商品不存在、已退貨或金額異常');
+ const remaining=lines.filter(i=>!selectedIds.includes(i.cartId));
+ if(!remaining.length)throw Error('退回全部項目請使用整單作廢');
+ const amount=money(selected.reduce((n,i)=>n+money(lineTotal(i)),0));
+ const total=money(remaining.reduce((n,i)=>n+money(lineTotal(i)),0));
+ if(money(total+amount)!==Number(order.total))throw Error('原單總額不一致，請先核對');
+ const counts=new Map();for(const i of selected)counts.set(i.id,(counts.get(i.id)||0)+1);
+ for(const [id,qty]of counts){const p=c.safeServices.find(p=>p.id===id);if(!p||!p.isProduct)throw Error('退回商品已刪除或類型變更');if(p.stock!=null&&(!Number.isSafeInteger(Number(p.stock))||Number(p.stock)<0||!Number.isSafeInteger(Number(p.stock)+qty)))throw Error('商品庫存異常');}
+ const at=new Date().toISOString(),id=generateId();
+ const record={id,orderId,orderDate:order.date,branchId:order.branchId||'',customerId:order.customerId||'',customerName:order.customerName||'散客',createdAt:at,reason:reason.trim(),items:JSON.parse(JSON.stringify(selected)),beforeTotal:Number(order.total),afterTotal:total,amount,status:amount===0?'notRequired':'pending',method:''};
+ const next={...order,items:remaining,total,updatedAt:at,productReturnIds:[...(order.productReturnIds||[]),id],revisionHistory:[...(order.revisionHistory||[]),{at,date:order.date,total:order.total,items:order.items,customerId:order.customerId,customerName:order.customerName,paymentMethod:order.paymentMethod,reason:'商品退貨：'+reason.trim()}]};
+ return {transactions:c.safeTransactions.map(t=>t.id===orderId?next:t),customers:c.safeCustomers.map(x=>x.id===order.customerId?{...x,totalSpend:money(Math.max(0,Number(x.totalSpend||0)-amount))}:x),services:c.safeServices.map(p=>counts.has(p.id)&&p.stock!=null?{...p,stock:Number(p.stock)+counts.get(p.id)}:p),inventoryLogs:[...selected.map(i=>({id:generateId(),date:at,branchId:order.branchId||'',orderId,returnId:id,itemId:i.id,itemName:i.name,type:'商品退貨回補',qty:1,cost:Number(i.cost)||0,note:reason.trim(),operator:'本機管理者'})),...c.safeInventoryLogs],settings:{...c.safeSettings,productReturns:[record,...(c.safeSettings.productReturns||[])]}};
+}
+function verifyProductReturnLinks(data){
+ const records=data.settings.productReturns||[],orders=[...data.transactions,...(data.settings.voidedOrders||[])],map=new Map(records.map(r=>[r.id,r]));
+ for(const r of records){const o=orders.find(o=>o.id===r.orderId);if(!o||(o.productReturnIds||[]).filter(id=>id===r.id).length!==1)throw Error('商品退貨紀錄與原單連結不一致');if(r.items.some(i=>(o.items||[]).some(x=>x.cartId===i.cartId)))throw Error('退回商品仍列在原單');}
+ for(const o of orders){const ids=o.productReturnIds||[];if(!Array.isArray(ids)||new Set(ids).size!==ids.length||ids.some(id=>map.get(id)?.orderId!==o.id))throw Error('原單缺少商品退貨紀錄');}
+}
+function settleProductRefund(settings,id,method){
+ const record=(settings.productReturns||[]).find(r=>r.id===id);
+ if(!record||record.status!=='pending')throw Error('此筆已退款或不需退款，請重新查看');
+ if(!settings.paymentMethods.includes(method))throw Error('請選擇退款方式');
+ return {...settings,productReturns:settings.productReturns.map(r=>r.id===id?{...r,status:'paid',method,paidAt:new Date().toISOString()}:r)};
+}
+function ProductReturnModal({order,onClose,onSave}){
+ const [selected,setSelected]=useState([]),[reason,setReason]=useState(''),[confirmed,setConfirmed]=useState(false);
+ const lines=order.items.map((i,n)=>({...i,cartId:i.cartId||('legacy-line-'+n)})).filter(i=>i.isProduct);
+ const amount=money(lines.filter(i=>selected.includes(i.cartId)).reduce((n,i)=>n+money(lineTotal(i)),0));
+ return <Modal title="部分商品退貨" onClose={onClose}><div className="space-y-4"><p>{order.customerName||'散客'} · 原單 {formatCurrency(order.total)}</p><p className="text-sm text-slate-500">勾選這次退回的商品；每列代表 1 件，按原單折扣後金額退款。其餘服務與商品留在原單。</p>{lines.map((i,n)=><label key={i.cartId} className="flex items-center gap-3 border rounded-xl p-3"><input type="checkbox" aria-label={'退回商品 '+(n+1)+' '+i.name} checked={selected.includes(i.cartId)} onChange={e=>setSelected(e.target.checked?[...selected,i.cartId]:selected.filter(id=>id!==i.cartId))}/><span className="flex-1">{i.name}<small className="block text-slate-500">第 {n+1} 件 · 1 件</small></span><strong>{formatCurrency(lineTotal(i))}</strong></label>)}<label className="block">退貨原因<input aria-label="退貨原因" className="input-field" value={reason} onChange={e=>setReason(e.target.value)}/></label><label className="flex gap-2"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>所選商品已退回且可再販售，回補庫存</label><div className="rounded-xl p-4 bg-slate-50"><p>本次待退款 <strong>{formatCurrency(amount)}</strong></p><p>原單剩餘 <strong>{formatCurrency(money(Number(order.total)-amount))}</strong></p></div><p className="text-sm text-slate-500">先保存退貨，再在原單的「退貨紀錄」登記已退款。此處不會自動轉帳。暫不支援服務退款、拆用商品退貨或任意退款金額。</p><button className="btn btn-primary w-full" disabled={!confirmed||!selected.length||!reason.trim()} onClick={()=>onSave(selected,reason)}>確認退貨，登記待退款</button></div></Modal>;
+}
 function reviseOrderData(updatedOrder,expected,c,reason){
  const {safeTransactions,safeCustomers,safeServices,safeInventoryLogs,safeSettings}=c;
  if(!reason?.trim())throw Error('請填寫修改原因');
     if (!updatedOrder.items?.length || updatedOrder.items.some(i=>!validLine(i)) || !Number.isFinite(new Date(updatedOrder.date).getTime())) throw Error('請檢查日期與項目金額；折扣不得超過售價');
     const oldOrder = safeTransactions.find(t => t.id === updatedOrder.id);
     assertOrderUnchanged(expected,oldOrder);
+    if(oldOrder.productReturnIds?.length)throw Error('此單已有商品退貨紀錄，暫不開放改單；可繼續退貨或作廢剩餘項目');
     if(salaryOrderLocked(safeSettings,oldOrder)||salaryOrderLocked(safeSettings,updatedOrder))throw Error('此月份已有確認薪資條，不能直接修改訂單');
     if(updatedOrder.paymentMethod!==oldOrder.paymentMethod&&!safeSettings.paymentMethods.includes(updatedOrder.paymentMethod))throw Error('付款方式已停用');
 
@@ -99,7 +138,7 @@ function settleOrderRefund(settings,orderId,method){
  if(!settings.paymentMethods.includes(method))throw Error('請選擇退款方式');
  return {...settings,voidedOrders:settings.voidedOrders.map(o=>o.id===orderId?{...o,refund:{...o.refund,status:'paid',method,paidAt:new Date().toISOString()}}:o)};
 }
-function VoidOrderModal({order,settings,onClose,onSave}){const [reason,setReason]=useState(''),[status,setStatus]=useState('pending'),[method,setMethod]=useState(settings.paymentMethods[0]||''),[returnStock,setReturnStock]=useState(false);return <Modal title="作廢與退款登記" onClose={onClose}><div className="space-y-4"><p>{order.customerName||'散客'} · {formatCurrency(order.total)}</p><p className="text-sm text-slate-500">作廢會撤回本單業績及會員累計。此處只記錄退款，不會替你操作銀行或支付平台。</p><label className="block">作廢原因<input aria-label="作廢原因" className="input-field" value={reason} onChange={e=>setReason(e.target.value)}/></label><label className="block">款項處理<select aria-label="款項處理" className="input-field" value={status} onChange={e=>setStatus(e.target.value)}><option value="pending">尚未退款，保留待退款紀錄</option><option value="paid">已實際全額退款</option><option value="notCollected">誤開單，實際未收款</option></select></label>{status==='paid'&&<label className="block">退款方式<select aria-label="退款方式" className="input-field" value={method} onChange={e=>setMethod(e.target.value)}>{settings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label>}{order.items.some(i=>i.isProduct)&&<label className="flex gap-2"><input type="checkbox" checked={returnStock} onChange={e=>setReturnStock(e.target.checked)}/>本單商品已全部退回且可再販售，回補庫存</label>}<p className="text-sm text-slate-500">未退回或不可再販售的商品不回補。本次提供整單作廢與全額退款登記；部分退貨／部分退款尚未開放。</p><button className="btn btn-danger w-full" onClick={()=>onSave(reason,{refundStatus:status,refundMethod:method,returnStock,expected:order})}>確認作廢</button></div></Modal>;}
+function VoidOrderModal({order,settings,onClose,onSave}){const [reason,setReason]=useState(''),[status,setStatus]=useState('pending'),[method,setMethod]=useState(settings.paymentMethods[0]||''),[returnStock,setReturnStock]=useState(false);return <Modal title="作廢與退款登記" onClose={onClose}><div className="space-y-4"><p>{order.customerName||'散客'} · {formatCurrency(order.total)}</p><p className="text-sm text-slate-500">作廢會撤回本單業績及會員累計。此處只記錄退款，不會替你操作銀行或支付平台。</p><label className="block">作廢原因<input aria-label="作廢原因" className="input-field" value={reason} onChange={e=>setReason(e.target.value)}/></label><label className="block">款項處理<select aria-label="款項處理" className="input-field" value={status} onChange={e=>setStatus(e.target.value)}><option value="pending">尚未退款，保留待退款紀錄</option><option value="paid">已實際全額退款</option><option value="notCollected">誤開單，實際未收款</option></select></label>{status==='paid'&&<label className="block">退款方式<select aria-label="退款方式" className="input-field" value={method} onChange={e=>setMethod(e.target.value)}>{settings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label>}{order.items.some(i=>i.isProduct)&&<label className="flex gap-2"><input type="checkbox" checked={returnStock} onChange={e=>setReturnStock(e.target.checked)}/>本單商品已全部退回且可再販售，回補庫存</label>}<p className="text-sm text-slate-500">未退回或不可再販售的商品不回補。本次提供整單作廢與全額退款登記；部分商品退貨請關閉後使用原單的「退貨／退款」；服務部分退款尚未開放。</p><button className="btn btn-danger w-full" onClick={()=>onSave(reason,{refundStatus:status,refundMethod:method,returnStock,expected:order})}>確認作廢</button></div></Modal>;}
 function localRecoveryPoint(){const store=getBusinessStore(),data={schemaVersion:5,exportedAt:new Date().toISOString()};for(const [k,key]of Object.entries(DATA_KEYS))data[k]=store.get(key);data.draft=store.get('salon_offline_draft');return JSON.parse(JSON.stringify(data));}
 function isStorageQuota(e){return e?.name==='QuotaExceededError'||e?.name==='NS_ERROR_DOM_QUOTA_REACHED';}
 function storageFailure(e){return e?.name==='SecurityError'?'瀏覽器拒絕本機儲存，請確認使用一般視窗並允許網站儲存。':isStorageQuota(e)?'本機儲存空間不足，請下載備份；不要清除瀏覽器資料。':('寫入錯誤：'+(e?.message||'未知原因'));}
@@ -1382,12 +1421,14 @@ const {safeTransactions,confirmAction,transactions,customers,setCustomers,safeSe
                     }).sort((a,b) => new Date(b.date) - new Date(a.date));
                 }, [safeTransactions, queryDate, searchTerm, dateMode, filterStylist, filterBranch]);
 
+const [productReturnOrder,setProductReturnOrder]=useState(null);
+const saveProductReturn=(ids,reason)=>{try{commitTables(returnProductData(productReturnOrder.id,productReturnOrder,ids,reason,orderContext()));setProductReturnOrder(null);showToast('退貨已保存；請在原單退貨紀錄登記退款');}catch(e){showToast(e.message,'error');}};
 const [voidingOrder,setVoidingOrder]=useState(null);
 const handleDeleteOrder=id=>setVoidingOrder(safeTransactions.find(t=>t.id===id));
 const saveVoid=(reason,options)=>{try{commitTables(voidOrderData(voidingOrder.id,reason,orderContext(),options));setVoidingOrder(null);showToast('已作廢；原單、退款狀態與庫存處理已保存');}catch(e){showToast(e.message,'error');}};
 const [refundTarget,setRefundTarget]=useState(null),[refundMethod,setRefundMethod]=useState('');
 const markRefund=t=>{setRefundTarget(t);setRefundMethod(safeSettings.paymentMethods.includes(t.paymentMethod)?t.paymentMethod:safeSettings.paymentMethods[0]||'');};
-const saveRefund=()=>{try{const settings=localRecoveryPoint().settings;commitTables({settings:settleOrderRefund(settings,refundTarget.id,refundMethod)});setRefundTarget(null);showToast('已登記全額退款');}catch(e){showToast(e.message,'error');}};
+const saveRefund=()=>{try{const settings=localRecoveryPoint().settings;commitTables({settings:refundTarget.productReturn?settleProductRefund(settings,refundTarget.id,refundMethod):settleOrderRefund(settings,refundTarget.id,refundMethod)});setRefundTarget(null);showToast('已登記退款');}catch(e){showToast(e.message,'error');}};
 
 
 const handleUpdateOrder = (updatedOrder,reason) => {
@@ -1395,6 +1436,7 @@ const handleUpdateOrder = (updatedOrder,reason) => {
 };
 // 替換你原本的 EditOrderModal
                 
+                const renderProductReturn=r=><div className="border-t pt-2 text-sm" key={r.id}><strong>{r.status==='paid'?'已退款':r.status==='notRequired'?'零元，無須退款':'待退款'} {formatCurrency(r.amount)}</strong><p>{r.items.map(i=>i.name).join('、')} · {r.reason}</p><p className="text-slate-500">退貨 {localDateTime(r.createdAt).replace('T',' ')}{r.paidAt?' · 退款 '+localDate(r.paidAt)+' '+r.method:''}</p>{r.status==='pending'&&<button className="btn btn-secondary mt-2" onClick={()=>markRefund({...r,total:r.amount,productReturn:true})}>登記商品退款</button>}</div>;
                 const renderOrder=t=>{
 
                         const customer = safeCustomers.find(c => c.id === t.customerId);
@@ -1450,6 +1492,7 @@ const handleUpdateOrder = (updatedOrder,reason) => {
                                             })}
                                         </div>
 
+                                        <details className="mt-3 border-t pt-2"><summary>退貨／退款{(t.productReturnIds||[]).length?' · '+t.productReturnIds.length+' 筆紀錄':''}</summary><div className="space-y-3 mt-3">{t.items.some(i=>i.isProduct)&&<button className="btn btn-secondary" onClick={()=>setProductReturnOrder(t)}>選擇退回商品</button>}{(safeSettings.productReturns||[]).filter(r=>r.orderId===t.id).map(r=>renderProductReturn(r))}{!t.items.some(i=>i.isProduct)&&!(t.productReturnIds||[]).length&&<p className="text-sm text-slate-500">此單沒有商品；整單取消請使用作廢。</p>}</div></details>
                                         {/* 懸浮按鈕 */}
                                         <div className="absolute top-4 right-4 flex gap-2 bg-white/90 p-1.5 rounded-lg shadow-sm backdrop-blur-sm border border-slate-100">
                                         <button onClick={()=>setEditingOrder(t)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all" title="編輯"><Edit size={16}/></button>
@@ -1485,7 +1528,7 @@ const groups=Object.values(filteredOrders.reduce((acc,t)=>{const id=t.mainStylis
                             </div>
                         )}
 
-                        <details className="card p-4 mt-5"><summary>作廢訂單紀錄</summary>{(safeSettings.voidedOrders||[]).filter(t=>localDate(t.date).startsWith(queryDate)&&branchMatch(t,filterBranch)&&(filterStylist==='all'||t.mainStylistId===filterStylist)).map(t=><div className="consumption-row" key={t.id}><span>{localDate(t.date)} · {t.customerName} · {formatCurrency(t.total)}</span><span>{t.voidReason} · 作廢於 {localDate(t.voidedAt)}<small className="block">{({pending:'待退款',paid:'已全額退款',notCollected:'實際未收款',notRequired:'零元，無須退款'})[t.refund?.status]||'舊單：退款狀態未核對'}{t.refund?.paidAt&&' · '+localDate(t.refund.paidAt)+' · '+t.refund.method}</small></span>{t.refund?.status==='pending'&&<button className="btn btn-secondary" onClick={()=>markRefund(t)}>登記已退款</button>}</div>)}</details>{refundTarget&&<Modal title="登記已退款" onClose={()=>setRefundTarget(null)}><div className="space-y-4"><p>確認已實際退還 {formatCurrency(refundTarget.total)} 給 {refundTarget.customerName||'散客'}。這項操作只登記款項，不會再回補庫存或重扣業績。</p><label className="block">退款方式<select aria-label="退款方式" className="input-field" value={refundMethod} onChange={e=>setRefundMethod(e.target.value)}>{safeSettings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label><button className="btn btn-primary w-full" onClick={saveRefund}>確認已實際退款</button></div></Modal>}{voidingOrder&&<VoidOrderModal order={voidingOrder} settings={safeSettings} onClose={()=>setVoidingOrder(null)} onSave={saveVoid}/>}{editingOrder && <EditOrderModal order={editingOrder} onClose={()=>setEditingOrder(null)} onSave={handleUpdateOrder}/>}
+                        <details className="card p-4 mt-5"><summary>作廢訂單紀錄</summary>{(safeSettings.voidedOrders||[]).filter(t=>localDate(t.date).startsWith(queryDate)&&branchMatch(t,filterBranch)&&(filterStylist==='all'||t.mainStylistId===filterStylist)).map(t=><div className="consumption-row" key={t.id}><span>{localDate(t.date)} · {t.customerName} · {formatCurrency(t.total)}</span><span>{t.voidReason} · 作廢於 {localDate(t.voidedAt)}<small className="block">{({pending:'待退款',paid:'已全額退款',notCollected:'實際未收款',notRequired:'零元，無須退款'})[t.refund?.status]||'舊單：退款狀態未核對'}{t.refund?.paidAt&&' · '+localDate(t.refund.paidAt)+' · '+t.refund.method}</small></span>{(safeSettings.productReturns||[]).filter(r=>r.orderId===t.id).map(renderProductReturn)}{t.refund?.status==='pending'&&<button className="btn btn-secondary" onClick={()=>markRefund(t)}>登記已退款</button>}</div>)}</details>{refundTarget&&<Modal title="登記已退款" onClose={()=>setRefundTarget(null)}><div className="space-y-4"><p>確認已實際退還 {formatCurrency(refundTarget.total)} 給 {refundTarget.customerName||'散客'}。這項操作只登記款項，不會再回補庫存或重扣業績。</p><label className="block">退款方式<select aria-label="退款方式" className="input-field" value={refundMethod} onChange={e=>setRefundMethod(e.target.value)}>{safeSettings.paymentMethods.map(m=><option key={m}>{m}</option>)}</select></label><button className="btn btn-primary w-full" onClick={saveRefund}>確認已實際退款</button></div></Modal>}{productReturnOrder&&<ProductReturnModal order={productReturnOrder} onClose={()=>setProductReturnOrder(null)} onSave={saveProductReturn}/>}{voidingOrder&&<VoidOrderModal order={voidingOrder} settings={safeSettings} onClose={()=>setVoidingOrder(null)} onSave={saveVoid}/>}{editingOrder && <EditOrderModal order={editingOrder} onClose={()=>setEditingOrder(null)} onSave={handleUpdateOrder}/>}
                     </div>
                 );
             };
@@ -1679,6 +1722,10 @@ const localDate=value=>localDateTime(value).slice(0,10);
 function validateStored(key,value) {
  if(key==='salon_offline_settings') {
   if(!value || typeof value!=='object' || Array.isArray(value))throw Error('設定格式錯誤');
+  if(value.productReturns!==undefined){
+   if(!Array.isArray(value.productReturns)||value.productReturns.some(r=>!r||typeof r.id!=='string'||!r.id)||new Set(value.productReturns.map(r=>r.id)).size!==value.productReturns.length)throw Error('商品退貨紀錄編號錯誤');
+   for(const r of value.productReturns){if(!r.orderId||!r.reason?.trim()||!Number.isFinite(new Date(r.createdAt).getTime())||!Array.isArray(r.items)||!r.items.length||r.items.some(i=>!i.isProduct||!i.cartId||!validLine(i))||new Set(r.items.map(i=>i.cartId)).size!==r.items.length||![r.amount,r.beforeTotal,r.afterTotal].every(n=>Number.isFinite(n)&&n>=0)||r.amount!==money(r.items.reduce((n,i)=>n+money(lineTotal(i)),0))||money(r.afterTotal+r.amount)!==r.beforeTotal||!['pending','paid','notRequired'].includes(r.status)||(r.amount===0)!==(r.status==='notRequired')||(r.status==='paid'&&(!r.method||!Number.isFinite(new Date(r.paidAt).getTime()))))throw Error('商品退貨金額或退款狀態錯誤');}
+  }
   if(value.voidedOrders!==undefined){
    if(!Array.isArray(value.voidedOrders)||value.voidedOrders.some(o=>!o||!o.id)||new Set(value.voidedOrders.map(o=>o.id)).size!==value.voidedOrders.length)throw Error('作廢紀錄格式或編號錯誤');
    for(const o of value.voidedOrders){const r=o.refund;if(!r)continue;if(!['pending','paid','notCollected','notRequired'].includes(r.status)||!Number.isFinite(r.amount)||r.amount<0||r.amount!==money(Number(o.total))||(r.status==='notRequired'&&r.amount!==0)||(r.status==='paid'&&(!r.method||!Number.isFinite(new Date(r.paidAt).getTime()))))throw Error('作廢退款紀錄金額或狀態錯誤');}
@@ -1724,6 +1771,7 @@ function validateBackup(data) {
  result.expenses=result.expenses.map(normalizeBackupExpense);
  for(const k of ["cloudKey","syncToken","shopID"])delete result.settings[k];
  verifySalaryLinks(result);
+ verifyProductReturnLinks(result);
  return result;
 }
 function restoreSnapshot(data,draft,before){const writes=Object.entries(DATA_KEYS).map(([k,key])=>[key,JSON.stringify(data[k])]);writes.push(['salon_offline_draft',JSON.stringify(draft)]);writeBusinessTables(writes,{beforeRestore:before,force:true});}
@@ -1978,7 +2026,7 @@ function OptionManager({field,title,colorField}) {
                         <nav className="flex-1 p-4 space-y-2">
                             {[ {id:'pos', icon:CreditCard, label:'收銀開單'}, {id:'orders', icon:ClipboardList, label:'查單管理'}, {id:'report', icon:Activity, label:'營運報表'}, {id:'customers', icon:User, label:'顧客資料'}, {id:'staff', icon:UserCog, label:'人員管理'}, {id:'salary',icon:Banknote,label:'薪資條'}, {id:'inventory', icon:Box, label:'商品庫存'}, {id:'settings', icon:Settings, label:'店家設定'} ].map(item=>(<button key={item.id} onClick={()=>setActiveTab(item.id)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all font-bold ${activeTab===item.id?'bg-indigo-50 text-indigo-600':'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}><item.icon size={20}/>{item.label}</button>))}
                         </nav>                 
-                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.5 查單測試版</div>
+                        <div className="p-4 border-t border-slate-100 text-xs text-center text-slate-400 font-medium">● 本機儲存 · v32.6 商品退貨測試版</div>
                     </aside>
                     
                     {/* 手機版全螢幕選單 */}
