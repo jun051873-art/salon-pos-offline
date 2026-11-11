@@ -1,0 +1,45 @@
+plugins { id 'com.android.application' }
+def releaseProps = new Properties()
+def configFile = rootProject.file('release.local.properties')
+if (configFile.exists()) configFile.withInputStream { releaseProps.load(it) }
+def quoted = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"' }
+android {
+    namespace 'com.jun051873.salonpos'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'com.jun051873.salonpos'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '1.0.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        buildConfigField 'String', 'PLAY_PUBLIC_KEY', quoted(releaseProps.getProperty('playPublicKey', ''))
+        buildConfigField 'String', 'PRO_PRODUCT_ID', '"salon_pro_lifetime"'
+    }
+    signingConfigs {
+        release {
+            if (releaseProps.getProperty('storeFile')) {
+                storeFile file(releaseProps.getProperty('storeFile'))
+                storePassword releaseProps.getProperty('storePassword')
+                keyAlias releaseProps.getProperty('keyAlias')
+                keyPassword releaseProps.getProperty('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        debug { }
+        release { signingConfig signingConfigs.release; minifyEnabled false }
+    }
+    buildFeatures { buildConfig true }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+dependencies {
+    implementation 'androidx.webkit:webkit:1.14.0'
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'com.android.billingclient:billing:9.1.0'
+    implementation 'com.google.android.gms:play-services-auth:21.4.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test:rules:1.6.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

@@ -1,6 +1,7 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('fs'),es=require('esbuild');
-es.buildSync({entryPoints:[__dirname+'/../business-store.js'],platform:'node',format:'cjs',outfile:'/tmp/salon-store-tests.cjs'});
-const {createBusinessStore,STORE_KEY}=require('/tmp/salon-store-tests.cjs');
+const storeCode=es.buildSync({entryPoints:[__dirname+'/../business-store.js'],platform:'node',format:'cjs',write:false}).outputFiles[0].text;
+const storeModule={exports:{}};new Function('module','exports','require',storeCode)(storeModule,storeModule.exports,require);
+const {createBusinessStore,STORE_KEY}=storeModule.exports;
 class Storage{constructor(){this.rows=new Map;this.failure=null;}getItem(k){return this.rows.get(k)??null;}setItem(k,v){if(this.failure?.(k,v)){const e=Error('quota');e.name='QuotaExceededError';throw e;}this.rows.set(k,v);}removeItem(k){this.rows.delete(k);}}
 class Locks{constructor(){this.held=false;}request(name,options,callback){if(this.held)return Promise.resolve(callback(null));this.held=true;return Promise.resolve(callback({name})).finally(()=>{this.held=false;});}}
 const keys=['salon_offline_customers','salon_offline_pending_orders','salon_offline_draft'];
