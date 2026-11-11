@@ -2,7 +2,7 @@
 export const STORE_KEY='salon_offline_database_v1';
 export const LOCK_NAME='salon-pos-offline-writer-v1';
 const clone=value=>JSON.parse(JSON.stringify(value));
-export function createBusinessStore({storage,locks,keys,validate,onFailure=()=>{},reclaim=()=>{},id=()=>Date.now()+'-'+Math.random()}){
+export function createBusinessStore({storage,locks,keys,validate,onFailure=()=>{},reclaim=()=>{},beforeWrite=(old,next)=>next,id=()=>Date.now()+'-'+Math.random()}){
  const listeners=new Set();let raw=storage.getItem(STORE_KEY),data={},beforeRestore=null,revision=null;
  let mode='starting',message='正在確認本機資料與開單視窗…',lastError='',started=false,release=null;
  const legacy=new Map(keys.map(key=>[key,storage.getItem(key)]));
@@ -21,9 +21,10 @@ export function createBusinessStore({storage,locks,keys,validate,onFailure=()=>{
  const register=(key,defaultValue)=>{if(!keys.includes(key))throw Error('未知資料表');if(!Object.hasOwn(data,key)){const text=storage.getItem(key);legacy.set(key,text);data[key]=validate(key,text===null?clone(defaultValue):JSON.parse(text));}return data[key];};
  const assertWritable=()=>{if(mode!=='writer')throw failure(status()||'此視窗不能寫入');try{fresh();}catch(e){if(e.salonStorageFailure)throw e;throw failure('無法讀取本機儲存：'+e.message);}};
  const write=(changes,options={})=>{
-  assertWritable();const next={...data};
+  assertWritable();let next={...data};
   try{for(const [key,value]of Object.entries(changes)){if(!keys.includes(key))throw Error('未知資料表：'+key);next[key]=validate(key,clone(value));}}catch(e){throw failure('本次操作未儲存：'+e.message);}
   for(const key of keys)if(!Object.hasOwn(next,key))throw failure('資料尚未初始化完成');
+  try{next=beforeWrite(data,next,options);}catch(e){throw failure('本次操作未儲存：'+e.message);}
   const nextBefore=options.beforeRestore===undefined?beforeRestore:clone(options.beforeRestore);
   if(!options.force&&JSON.stringify(next)===JSON.stringify(data)&&JSON.stringify(nextBefore)===JSON.stringify(beforeRestore)){lastError='';notify();return;}
   const nextRevision=String(id()),text=JSON.stringify({storageVersion:1,revision:nextRevision,data:next,beforeRestore:nextBefore});
