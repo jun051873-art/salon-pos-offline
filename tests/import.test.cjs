@@ -1,8 +1,8 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('fs'),os=require('os'),path=require('path'),es=require('esbuild');
 const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'salon-import-'));
 const source=fs.readFileSync(__dirname+'/../app.jsx','utf8').replace(/    const root = ReactDOM.createRoot[\s\S]*$/,'');
-es.buildSync({stdin:{contents:'import React from "react"; import {createBusinessStore,STORE_KEY} from "./business-store.js";\n'+source+'\nexport {validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll,checkoutInventory};',loader:'jsx',resolveDir:path.resolve(__dirname,'..')},bundle:true,platform:'node',format:'cjs',outfile:scratch+'/validator.cjs',nodePaths:[process.env.SALON_NODE_MODULES||path.resolve(__dirname,'../node_modules')]});
-const {validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll,checkoutInventory}=require(scratch+'/validator.cjs');
+es.buildSync({stdin:{contents:'import React from "react"; import {createBusinessStore,STORE_KEY} from "./business-store.js";\n'+source+'\nexport {salaryDraft,correctionDraft,settleCorrection,backupConflicts,validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll,checkoutInventory};',loader:'jsx',resolveDir:path.resolve(__dirname,'..')},bundle:true,platform:'node',format:'cjs',outfile:scratch+'/validator.cjs',nodePaths:[process.env.SALON_NODE_MODULES||path.resolve(__dirname,'../node_modules')]});
+const {salaryDraft,correctionDraft,settleCorrection,backupConflicts,validateBackup,performanceData,appearanceExport,appearanceImport,calculatePayroll,checkoutInventory}=require(scratch+'/validator.cjs');
 const basic=()=>({services:[{id:'cut',name:'測試剪髮',price:600,category:'剪髮',isProduct:false}],stylists:[{id:'staff',name:'測試人員'}],customers:[],transactions:[{id:'order',date:'2026-10-15T04:00:00.000Z',items:[{id:'cut',name:'測試剪髮',category:'剪髮',price:600,stylistId:'staff'}],total:600}],settings:{},pendingOrders:[],inventoryLogs:[],expenses:[]});
 test('legacy null, missing, and empty drafts restore as empty without changing caller',()=>{for(const draft of [null,undefined,{}]){const input={...basic(),draft},before=JSON.stringify(input);const result=validateBackup(input);assert.deepEqual(result.draft,{});assert.equal(result.transactions[0].total,600);assert.equal(JSON.stringify(input),before);}});
 test('invalid nonempty draft and invalid amounts still rejected',()=>{for(const draft of ['',[],42,{cart:'wrong'},{cart:[{id:'cut',name:'測試',price:-1}]}])assert.throws(()=>validateBackup({...basic(),draft}));const invalid=basic();invalid.transactions[0].total=999;assert.throws(()=>validateBackup(invalid),/總額/);});
@@ -17,7 +17,7 @@ test('private backup integrity, persisted roundtrip and application pages',{skip
  const open=record=>new JSDOM(html,{url:'https://jun051873-art.github.io/salon-pos-offline/',runScripts:'dangerously',pretendToBeVisual:true,virtualConsole,beforeParse(w){w.navigator.locks={request:async(n,o,fn)=>fn({name:n})};w.confirm=()=>true;w.alert=message=>errors.push(message);if(record)w.localStorage.setItem('salon_offline_database_v1',record);}});
  const wait=()=>new Promise(r=>setTimeout(r,50));let dom=open(),record;
  const click=async text=>{const b=[...dom.window.document.querySelectorAll('button')].find(b=>b.textContent.trim()===text);assert(b,'button '+text);b.click();await wait();};
- try{await wait();await click('店家設定');await click('備份與維護');const inputEl=dom.window.document.querySelector('input[type=file]');Object.defineProperty(inputEl,'files',{value:[{text:async()=> '\uFEFF'+bytes.toString('utf8')}]});inputEl.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await wait();record=dom.window.localStorage.getItem('salon_offline_database_v1');assert(record);const restored=JSON.parse(record);assert.deepEqual(restored.data.salon_offline_transactions,result.transactions);assert.deepEqual(restored.data.salon_offline_customers,result.customers);assert.deepEqual(restored.data.salon_offline_draft,{});assert(restored.beforeRestore);assert.equal(errors.length,0,errors.join('\n'));}finally{dom.window.close();}
+ try{await wait();await click('店家設定');await click('備份與維護');const inputEl=dom.window.document.querySelector('input[type=file]');Object.defineProperty(inputEl,'files',{value:[{text:async()=> '\uFEFF'+bytes.toString('utf8')}]});inputEl.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await wait();const form=dom.window.document.querySelector('.text-request'),confirmInput=form.querySelector('input');Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(confirmInput,'還原資料');confirmInput.dispatchEvent(new dom.window.Event('input',{bubbles:true}));await wait();form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));await wait();record=dom.window.localStorage.getItem('salon_offline_database_v1');assert(record);const restored=JSON.parse(record);assert.deepEqual(restored.data.salon_offline_transactions,result.transactions);assert.deepEqual(restored.data.salon_offline_customers,result.customers);assert.deepEqual(restored.data.salon_offline_draft,{});assert(restored.beforeRestore);assert.equal(errors.length,0,errors.join('\n'));}finally{dom.window.close();}
  dom=open(record);try{await wait();for(const name of ['顧客資料','查單管理','營運報表','薪資條','商品庫存','收銀開單']){await click(name);assert(!dom.window.document.body.textContent.includes('系統暫時無法開啟'));}const reopened=JSON.parse(dom.window.localStorage.getItem('salon_offline_database_v1'));assert.equal(reopened.data.salon_offline_transactions.length,input.transactions.length);assert.equal(errors.length,0,errors.join('\n'));}finally{dom.window.close();}
 });
 
@@ -32,3 +32,32 @@ test('service accounting remains 2000 minus 400 minus 100 with 750 commission',(
  assert.throws(()=>checkoutInventory(items,[]),/停用或刪除/);
  for(const stock of [null,undefined])assert.equal(checkoutInventory(items,[{...services[0],stock}])[0].stock,stock);
  });
+
+test('future backup schema rejected; overwrite guard detects same-count changed or missing accounting',()=>{
+ assert.throws(()=>validateBackup({...basic(),schemaVersion:6}),/版本/);
+ const current=basic(),same=JSON.parse(JSON.stringify(current));assert.deepEqual(backupConflicts(current,same),[]);
+ same.transactions[0].total=500;assert.equal(backupConflicts(current,same).length,1);
+ same.transactions=[{...current.transactions[0],id:'replacement'}];assert.equal(backupConflicts(current,same).length,1);
+ same.transactions=[...current.transactions,{...current.transactions[0],id:'new'}];assert.deepEqual(backupConflicts(current,same),[]);
+ current.settings.salarySlips=[{id:'s',paidAt:'2026-11-01',net:190}];assert.equal(backupConflicts(current,same).length,1);
+});
+
+test('helper advance deducted once across months and released only by voiding unpaid salary',()=>{
+ const item={id:'cut',name:'剪髮',price:600,stylistId:'designer',category:'剪髮'};item.payroll=calculatePayroll(item,{materialMode:'fixed',materialValue:120,commissionRate:50},[{id:'helper',mode:'fixed',base:'gross',value:100}]);
+ const tx=[{id:'t',date:'2026-11-05T12:00:00Z',items:[item],total:600}],staff={id:'helper',name:'小安'},expenses=[{id:'advance',date:'2026-11-05',type:'員工借支',staffId:'helper',amount:30},{id:'future',date:'2026-12-01',type:'員工借支',staffId:'helper',amount:10}];
+ const d=salaryDraft(staff,'2026-11',tx,expenses,{},[]);assert.equal(d.gross,100);assert.equal(d.advance,30);assert.equal(d.net,70);assert.deepEqual(d.advanceIds,['advance']);
+ const settings={salarySlips:[{...d,id:'salary'}]};const next=salaryDraft(staff,'2026-12',[],expenses,settings,[]);assert.deepEqual(next.advanceIds,['future']);
+ settings.salarySlips[0].voidedAt='2026-11-06';assert.equal(salaryDraft(staff,'2026-11',tx,expenses,settings,[]).net,70);
+ const designer=salaryDraft({id:'designer',name:'Eason'},'2026-11',tx,expenses,{},[]);assert.equal(designer.net,190);
+});
+test('monthly and hourly salary use explicit mode and historical work rate; voided or outside hours excluded',()=>{
+ const logs=[{id:'w',staffId:'s',date:'2026-11-01',basePay:800},{id:'void',staffId:'s',date:'2026-11-02',basePay:900,voidedAt:'x'},{id:'old',staffId:'s',date:'2026-10-01',basePay:700}];
+ const calc=staff=>salaryDraft({id:'s',name:'staff',...staff},'2026-11',[],[],{workLogs:logs},[]);
+ assert.equal(calc({salaryMode:'hourly',hourlyRate:999}).net,800);assert.equal(calc({salaryMode:'monthly',salaryBase:30000}).net,30000);assert.equal(calc({baseSalary:24000}).net,0);
+});
+test('paid salary corrections preserve original, total 220 and cannot settle twice or over-recover',()=>{
+ global.crypto=require('node:crypto').webcrypto;
+ let settings={salarySlips:[{id:'s',staffId:'st',staffName:'Eason',month:'2026-11',branchId:'main',net:190,paidAt:'2026-11-06'}]},expenses=[{id:'paid',amount:190}];
+ for(const [amount,reason]of [[50,'補發'],[-20,'收回']]){const s=settings.salarySlips[0],c=correctionDraft(s,amount,reason);s.corrections=[...(s.corrections||[]),c];const result=settleCorrection(settings,expenses,'s',c.id);settings=result.settings;expenses=result.expenses;assert.throws(()=>settleCorrection(settings,expenses,'s',c.id),/狀態/);}
+ assert.equal(settings.salarySlips[0].net,190);assert.equal(expenses.reduce((n,e)=>n+e.amount,0),220);assert.throws(()=>correctionDraft(settings.salarySlips[0],-221,'超額'),/超過/);
+});
