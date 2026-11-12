@@ -6,6 +6,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.print.PrintManager;
 import android.view.*;
+import android.widget.FrameLayout;
+import androidx.core.view.*;
 import android.webkit.*;
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
@@ -30,7 +32,10 @@ public class MainActivity extends ComponentActivity {
     private WebView web;
     private BillingClient billing;
     private ProductDetails product;
-    private boolean pro=false, billingReady=false, pageReady=false;
+    private boolean pro=false, pageReady=false, connecting=false;
+    private final android.os.Handler main=new android.os.Handler(android.os.Looper.getMainLooper());
+    private final List<Runnable> billingWaiters=new ArrayList<>();
+    private String productMessage="正在讀取商店商品…";
     private String billingMessage="正在連接 Google Play…", purchaseRequest=null, authRequest=null;
     private String driveToken=null;
     private final ExecutorService network=Executors.newSingleThreadExecutor();
@@ -49,12 +54,16 @@ public class MainActivity extends ComponentActivity {
         registerLaunchers();
         web=new WebView(this);
         web.setBackgroundColor(0xfff6f7fa);
-        web.setOnApplyWindowInsetsListener((view,insets)->{
-            if(android.os.Build.VERSION.SDK_INT>=30){var edge=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.ime());view.setPadding(edge.left,edge.top,edge.right,edge.bottom);}
-            else view.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());
-            return insets;
+        WindowCompat.setDecorFitsSystemWindows(getWindow(),false);
+        FrameLayout content=new FrameLayout(this);
+        content.addView(web,new FrameLayout.LayoutParams(-1,-1));
+        ViewCompat.setOnApplyWindowInsetsListener(content,(view,insets)->{
+            var edge=insets.getInsets(WindowInsetsCompat.Type.systemBars()|WindowInsetsCompat.Type.ime());
+            var layout=(FrameLayout.LayoutParams)web.getLayoutParams();
+            layout.setMargins(edge.left,edge.top,edge.right,edge.bottom);web.setLayoutParams(layout);
+            return WindowInsetsCompat.CONSUMED;
         });
-        setContentView(web);
+        setContentView(content);ViewCompat.requestApplyInsets(content);
         WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setJavaScriptCanOpenWindowsAutomatically(false);s.setSupportMultipleWindows(false);
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
@@ -87,7 +96,7 @@ public class MainActivity extends ComponentActivity {
         }
         WebViewCompat.addWebMessageListener(web,"SalonNative",Collections.singleton(ORIGIN),(view,message,sourceOrigin,mainFrame,reply)->{
             if(!mainFrame||!ORIGIN.equals(sourceOrigin.toString()))return;
-            try{handle(new JSONObject(message.getData()));}catch(Exception e){ /* Malformed messages have no authority. */ }
+            try{JSONObject request=new JSONObject(message.getData());try{handle(request);}catch(Exception e){respond(request.optString("id"),null,"操作未完成，請重試（"+e.getClass().getSimpleName()+"）");}}catch(JSONException ignored){ /* Invalid JSON has no request identity. */ }
         });
         pro=readCachedPurchase();
         billing=BillingClient.newBuilder(this).setListener((result,purchases)->{
@@ -96,10 +105,7 @@ public class MainActivity extends ComponentActivity {
             else if(result.getResponseCode()==BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED)queryOwned(request);
             else {billingMessage=result.getResponseCode()==BillingClient.BillingResponseCode.USER_CANCELED?"已取消購買，未變更功能":"購買未完成，請稍後重試（"+result.getResponseCode()+"）";publish();respond(request,null,billingMessage);}
         }).enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build()).enableAutoServiceReconnection().build();
-        billing.startConnection(new BillingClientStateListener(){
-            public void onBillingSetupFinished(BillingResult result){billingReady=result.getResponseCode()==BillingClient.BillingResponseCode.OK;if(billingReady){loadProduct();queryOwned(null);}else{billingMessage="無法連接 Google Play；已購買的離線授權仍保留";publish();}}
-            public void onBillingServiceDisconnected(){billingReady=false;billingMessage="Google Play 暫時離線";publish();}
-        });
+        ensureBilling(null,()->{loadProduct(null);queryOwned(null);});
         getOnBackPressedDispatcher().addCallback(this,new OnBackPressedCallback(true){public void handleOnBackPressed(){
             web.evaluateJavascript("window.dispatchEvent(new Event('salon-back'))",null);
         }});
@@ -124,7 +130,8 @@ public class MainActivity extends ComponentActivity {
         String id=request.optString("id"),method=request.optString("method");JSONObject p=request.optJSONObject("params");if(p==null)p=new JSONObject();
         switch(method){
             case "billingState": respond(id,billingState(),null);break;
-            case "restorePurchases": if(billingReady)queryOwned(id);else respond(id,null,"請連上網路並確認 Google Play 已登入，再恢復購買");break;
+            case "restorePurchases": ensureBilling(id,()->queryOwned(id));break;
+            case "refreshBilling": ensureBilling(id,()->loadProduct(id));break;
             case "purchase": buy(id);break;
             case "driveConnect": if(!pro){respond(id,null,"自動雲端備份需專業版");break;}authorizeDrive(id,true);break;
             case "driveDisconnect": driveToken=null;respond(id,object("disconnected",true),null);break;
@@ -141,26 +148,55 @@ public class MainActivity extends ComponentActivity {
             default:respond(id,null,"不支援的操作");
         }
     }
-    private JSONObject billingState(){return object("native",true,"pro",pro,"ready",billingReady,"canPurchase",billingReady&&product!=null&&!BuildConfig.PLAY_PUBLIC_KEY.trim().isEmpty(),"price",price(),"message",billingMessage,"productId",BuildConfig.PRO_PRODUCT_ID);}
-    private String price(){if(product!=null&&product.getOneTimePurchaseOfferDetails()!=null)return product.getOneTimePurchaseOfferDetails().getFormattedPrice();return "NT$990";}
-    private void publish(){if(pageReady)runOnUiThread(()->web.evaluateJavascript("window.dispatchEvent(new CustomEvent('salon-billing',{detail:"+billingState()+"}))",null));}
+    private String statusMessage(){
+        if(pro)return "專業版已解鎖，無訂閱年費";
+        if(BuildConfig.PLAY_PUBLIC_KEY.trim().isEmpty())return "商店購買驗證尚未設定，未發起付款";
+        if(billing==null||!billing.isReady())return "Google Play 尚未連線，請點一次解鎖或重新連接商店重試";
+        if(product==null)return productMessage;
+        return billingMessage;
+    }
+    private JSONObject billingState(){return object("native",true,"pro",pro,"ready",billing!=null&&billing.isReady(),"canPurchase",billing!=null&&billing.isReady()&&product!=null&&!BuildConfig.PLAY_PUBLIC_KEY.trim().isEmpty(),"price",price(),"message",statusMessage(),"productId",BuildConfig.PRO_PRODUCT_ID,"version",BuildConfig.VERSION_NAME);}
+    private ProductDetails.OneTimePurchaseOfferDetails offer(){if(product==null)return null;var offers=product.getOneTimePurchaseOfferDetailsList();return offers==null||offers.isEmpty()?null:offers.get(0);}
+    private String price(){var offer=offer();return offer==null?"NT$990":offer.getFormattedPrice();}
+    private void publish(){if(pageReady)runOnUiThread(()->{if(web!=null)web.evaluateJavascript("window.dispatchEvent(new CustomEvent('salon-billing',{detail:"+billingState()+"}))",null);});}
     private void respond(String id,JSONObject value,String error){if(id==null||id.isEmpty())return;JSONObject r=object("id",id,"result",value==null?JSONObject.NULL:value,"error",error==null?JSONObject.NULL:error);runOnUiThread(()->{if(web!=null)web.evaluateJavascript("window.__salonNativeReply && window.__salonNativeReply("+r+")",null);});}
-    private void loadProduct(){billing.queryProductDetailsAsync(QueryProductDetailsParams.newBuilder().setProductList(Collections.singletonList(QueryProductDetailsParams.Product.newBuilder().setProductId(BuildConfig.PRO_PRODUCT_ID).setProductType(BillingClient.ProductType.INAPP).build())).build(),(result,details)->{
-        product=result.getResponseCode()==0&&!details.getProductDetailsList().isEmpty()?details.getProductDetailsList().get(0):null;
-        if(BuildConfig.PLAY_PUBLIC_KEY.trim().isEmpty())billingMessage="商店購買驗證尚未設定，暫不開放付款";
-        else if(product==null)billingMessage="商品尚未提供，請從 Google Play 測試連結安裝";
-        else billingMessage=pro?"專業版已解鎖，無訂閱年費":"一次購買，永久解鎖此專業版";
-        publish();
-    });}
+    private void ensureBilling(String id,Runnable action){
+        if(billing.isReady()){action.run();return;}
+        final boolean[] finished={false};
+        Runnable waiter=()->{if(finished[0])return;finished[0]=true;if(billing.isReady())action.run();else {if(id!=null&&id.equals(purchaseRequest))purchaseRequest=null;respond(id,null,"無法連接 Google Play，請確認網路、Play 商店已登入且為商店安裝版，再重試");}};
+        billingWaiters.add(waiter);
+        main.postDelayed(()->{if(!finished[0]){billingWaiters.remove(waiter);waiter.run();}},20000);
+        if(connecting)return;connecting=true;
+        billing.startConnection(new BillingClientStateListener(){
+            public void onBillingSetupFinished(BillingResult result){runOnUiThread(()->{connecting=false;var waiters=new ArrayList<>(billingWaiters);billingWaiters.clear();for(Runnable next:waiters)next.run();publish();});}
+            public void onBillingServiceDisconnected(){runOnUiThread(()->{connecting=false;publish();});}
+        });
+    }
+    private void fetchProduct(Runnable done){
+        productMessage="正在讀取商店商品…";
+        billing.queryProductDetailsAsync(QueryProductDetailsParams.newBuilder().setProductList(Collections.singletonList(QueryProductDetailsParams.Product.newBuilder().setProductId(BuildConfig.PRO_PRODUCT_ID).setProductType(BillingClient.ProductType.INAPP).build())).build(),(result,details)->runOnUiThread(()->{
+            product=result.getResponseCode()==0&&!details.getProductDetailsList().isEmpty()?details.getProductDetailsList().get(0):null;
+            if(product!=null&&offer()==null)product=null;
+            productMessage=result.getResponseCode()!=0?"商店商品讀取失敗（"+result.getResponseCode()+"），請重新連接商店":"目前帳號沒有可購買的商品方案，請確認 Play 帳號的國家為台灣，並由測試連結安裝";
+            publish();done.run();
+        }));
+    }
+    private void loadProduct(String id){fetchProduct(()->respond(id,billingState(),null));}
     private void buy(String id){
         if(pro){respond(id,billingState(),null);return;}
         if(purchaseRequest!=null){respond(id,null,"購買正在處理，請勿重複操作");return;}
-        if(!billingReady||product==null||BuildConfig.PLAY_PUBLIC_KEY.trim().isEmpty()){respond(id,null,"商店商品或購買驗證尚未就緒，未發起付款");return;}
-        var detail=BillingFlowParams.ProductDetailsParams.newBuilder().setProductDetails(product);
-        var offer=product.getOneTimePurchaseOfferDetails();if(offer!=null&&offer.getOfferToken()!=null)detail.setOfferToken(offer.getOfferToken());
+        if(BuildConfig.PLAY_PUBLIC_KEY.trim().isEmpty()){respond(id,null,"商店購買驗證尚未設定，未發起付款");return;}
         purchaseRequest=id;
-        BillingResult result=billing.launchBillingFlow(this,BillingFlowParams.newBuilder().setProductDetailsParamsList(Collections.singletonList(detail.build())).build());
-        if(result.getResponseCode()!=0){purchaseRequest=null;respond(id,null,"無法開啟商店付款（"+result.getResponseCode()+"）");}
+        main.postDelayed(()->{if(id.equals(purchaseRequest)){purchaseRequest=null;respond(id,null,"購買尚未完成，請確認 Google Play 結果，再恢復購買或重試");}},120000);
+        ensureBilling(id,()->fetchProduct(()->{
+            if(!id.equals(purchaseRequest))return;
+            if(product==null){purchaseRequest=null;respond(id,null,productMessage);return;}
+            try{
+                var detail=BillingFlowParams.ProductDetailsParams.newBuilder().setProductDetails(product).setOfferToken(offer().getOfferToken());
+                BillingResult result=billing.launchBillingFlow(this,BillingFlowParams.newBuilder().setProductDetailsParamsList(Collections.singletonList(detail.build())).build());
+                if(result.getResponseCode()!=0){purchaseRequest=null;respond(id,null,"無法開啟商店付款（"+result.getResponseCode()+"），請重新連接商店後重試");}
+            }catch(Exception error){purchaseRequest=null;respond(id,null,"無法開啟付款畫面，請更新 Google Play 商店後重試");}
+        }));
     }
     private void queryOwned(String id){billing.queryPurchasesAsync(QueryPurchasesParams.newBuilder().setProductType(BillingClient.ProductType.INAPP).build(),(result,purchases)->{
         if(result.getResponseCode()==0)processPurchases(purchases,true,id);
@@ -225,8 +261,8 @@ public class MainActivity extends ComponentActivity {
             try(var in=conn.getInputStream();var out=new ByteArrayOutputStream()){byte[] buffer=new byte[8192];int read;while((read=in.read(buffer))!=-1){if(out.size()+read>16*1024*1024)throw new IOException("備份超過可處理大小");out.write(buffer,0,read);}return out.toString("UTF-8");}
         }finally{conn.disconnect();}
     }
-    @Override protected void onResume(){super.onResume();if(web!=null)web.onResume();if(billing!=null&&billing.isReady())queryOwned(null);}
+    @Override protected void onResume(){super.onResume();if(web!=null)web.onResume();if(billing!=null)ensureBilling(null,()->{loadProduct(null);queryOwned(null);});}
     @Override protected void onPause(){if(web!=null)web.onPause();super.onPause();}
-    @Override protected void onDestroy(){if(billing!=null)billing.endConnection();network.shutdown();if(web!=null){web.destroy();web=null;}super.onDestroy();}
+    @Override protected void onDestroy(){main.removeCallbacksAndMessages(null);if(billing!=null)billing.endConnection();network.shutdown();if(web!=null){web.destroy();web=null;}super.onDestroy();}
 }
 

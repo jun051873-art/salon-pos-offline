@@ -10,8 +10,8 @@ android {
         applicationId 'com.jun051873.salonpos'
         minSdk 26
         targetSdk 36
-        versionCode 1
-        versionName '1.0.0'
+        versionCode 3
+        versionName '1.0.1'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField 'String', 'PLAY_PUBLIC_KEY', quoted(releaseProps.getProperty('playPublicKey', ''))
         buildConfigField 'String', 'PRO_PRODUCT_ID', '"salon_pro_lifetime"'

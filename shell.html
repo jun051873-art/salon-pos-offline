@@ -1,14 +1,14 @@
 <!DOCTYPE html><html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
    
-    <title>專屬空間沙龍｜POS v33.0.0 儲值損益與加密備份版</title>
+    <title>美髮開單｜POS v33.0.0 儲值損益與加密備份版</title>
     
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-title" content="專屬空間沙龍">
+    <meta name="apple-mobile-web-app-title" content="美髮開單">
     
     <style>
 /*! tailwindcss v4.2.1 | MIT License | https://tailwindcss.com */
@@ -13167,9 +13167,19 @@
 .app-shell[data-low-effects="true"] *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;animation:none!important;transition:none!important;scroll-behavior:auto!important}
 @media(prefers-reduced-motion:reduce){.app-shell *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style>
-<style>.license-panel{max-width:760px;margin:24px auto;border:1px solid #d9c9aa!important}.license-panel h2{font-size:24px;line-height:1.5;color:#172137}.license-panel p{line-height:1.85;margin:14px 0}.license-eyebrow{color:#8b7448;letter-spacing:.12em;font-size:13px}.license-price{font-size:32px;font-weight:700}.license-price small{font-size:14px;color:#667085}.license-panel small{line-height:1.8;display:inline-block}.license-panel button:disabled{opacity:.5;cursor:not-allowed}</style></head>
+<style>.license-panel{max-width:760px;margin:24px auto;border:1px solid #d9c9aa!important}.license-panel h2{font-size:24px;line-height:1.5;color:#172137}.license-panel p{line-height:1.85;margin:14px 0}.license-eyebrow{color:#8b7448;letter-spacing:.12em;font-size:13px}.license-price{font-size:32px;font-weight:700}.license-price small{font-size:14px;color:#667085}.license-panel small{line-height:1.8;display:inline-block}.license-panel button:disabled{opacity:.5;cursor:not-allowed}</style><style>
+:root{--salon-view-height:100dvh;--salon-view-top:0px}
+.app-shell{height:var(--salon-view-height)!important;min-height:0!important}
+.salon-modal-overlay,.salon-confirm-layer{top:var(--salon-view-top)!important;bottom:auto!important;height:var(--salon-view-height)!important;padding:12px!important;overflow:hidden}
+.app-shell [role="dialog"],.salon-modal{max-height:calc(var(--salon-view-height) - 24px)!important}
+.salon-confirm-layer>[role="dialog"]{overflow-y:auto}
+.salon-modal-body{scroll-padding-block:28px;padding-bottom:32px}
+input,textarea,select{scroll-margin-block:28px}
+.salon-brand-icon{width:40px;height:40px;object-fit:cover;border-radius:10px;flex-shrink:0}
+@media(max-height:500px){.salon-modal-header{padding:10px 16px}.salon-modal-body{padding:12px 16px 28px}.work-header{padding-block:8px}}
+</style></head>
 <body>
-    <div id="root"><div style="padding:40px;font-family:system-ui">正在開啟專屬空間沙龍…</div></div><noscript>請在 Safari、Chrome 或 Edge 開啟本檔案並啟用 JavaScript。檔案預覽不一定能執行開單系統。</noscript>
+    <div id="root"><div style="padding:40px;font-family:system-ui">正在開啟美髮開單…</div></div><noscript>請在 Safari、Chrome 或 Edge 開啟本檔案並啟用 JavaScript。檔案預覽不一定能執行開單系統。</noscript>
 
     <div id="startup-status" role="alert" hidden style="max-width:640px;margin:20px auto;padding:20px;border:1px solid #c78b55;border-radius:12px;background:#fff8ed;color:#412b1c;font-family:system-ui;white-space:pre-wrap"></div>
     <script id="salon-startup-guard">

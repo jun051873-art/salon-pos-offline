@@ -39,7 +39,7 @@ test('cancelled purchase never grants pro and restore reflects native verified s
  e.state.pro=true;e.state.canPurchase=false;e.state.message='專業版已解鎖';await e.click('恢復購買');assert(!e.d.querySelector('.license-panel'));assert.deepEqual(e.errors,[]);
  }finally{e.close();}
 });
-test('unconfigured store never offers a payable button',async()=>{const e=await mount({ready:false});try{await e.click('店家設定');await e.click('版本與購買');assert(e.button('一次解鎖專業版').disabled);assert(!e.calls.some(c=>c.method==='purchase'));}finally{e.close();}});
+test('disconnected store remains actionable and offers refresh instead of a dead disabled button',async()=>{const e=await mount({ready:false});try{await e.click('店家設定');await e.click('版本與購買');assert(!e.button('一次解鎖專業版').disabled);await e.click('一次解鎖專業版');assert(e.calls.some(c=>c.method==='purchase'));assert(e.d.querySelector('[role="alert"]'));await e.click('重新連接商店');assert(e.calls.some(c=>c.method==='refreshBilling'));}finally{e.close();}});
 test('native Drive backup transmits encrypted data, no client ID setup or raw business data',async()=>{
  const e=await mount({pro:true});try{
    await e.click('店家設定');await e.click('個人雲端');assert(!e.d.textContent?.includes('Google OAuth 用戶端 ID'));assert(!e.d.querySelector('details summary')?.textContent.includes('Google Drive 初次連線設定'));
@@ -48,4 +48,14 @@ test('native Drive backup transmits encrypted data, no client ID setup or raw bu
    const upload=e.calls.find(c=>c.method==='driveUpload');assert(upload,JSON.stringify(e.calls.map(c=>c.method))+' '+[...e.d.querySelectorAll('[role="status"],[role="alert"]')].map(x=>x.textContent).join(' / ')+' '+e.errors.join(' / '));assert.equal(upload.params.encrypted.format,'salon-encrypted-backup');assert(!('customers' in upload.params.encrypted));assert(!('password' in upload.params));assert(!JSON.stringify(upload).includes('test-password-123'));
    assert.deepEqual(e.errors,[]);
  }finally{e.close();}
+});
+
+test('free cloud page explains unlock and connect failure visibly, without sending data',async()=>{const e=await mount();try{await e.click('店家設定');await e.click('個人雲端');assert(e.d.body.textContent.includes('個人雲端備份需專業版'));await e.click('連接 Google Drive');assert(e.d.body.textContent.includes('備份未完成：此功能需專業版'));assert(!e.calls.some(c=>c.method==='driveConnect'));}finally{e.close();}});
+test('cloud invalid password gives visible feedback and does not start authorization',async()=>{const e=await mount({pro:true});try{await e.click('店家設定');await e.click('個人雲端');await e.click('連接 Google Drive');assert(e.d.body.textContent.includes('請輸入至少10字元'));assert(!e.calls.some(c=>c.method==='driveConnect'));assert(!e.button('連接 Google Drive').disabled);}finally{e.close();}});
+test('default branding uses the approved icon and follows a changed shop name',async()=>{const e=await mount();try{assert(!e.d.body.textContent.includes('專屬空間'));assert.equal(e.d.querySelector('.salon-brand-icon').getAttribute('src'),'./icon-192.png');await e.click('店家設定');await e.fill(e.d.querySelector('input[aria-label="店名"]'),'測試美髮店');assert(e.d.body.textContent.includes('測試美髮店'));}finally{e.close();}});
+
+test('existing placeholder name becomes generic without replacing a custom shop name',async()=>{
+ let e=await mount(),record;try{await e.click('店家設定');await e.fill(e.d.querySelector('input[aria-label=店名]'),'專屬空間沙龍');record=JSON.parse(e.record());}finally{e.close();}
+ e=await mount({record:JSON.stringify(record)});try{assert(!e.d.body.textContent.includes('專屬空間'));assert(e.d.body.textContent.includes('美髮開單'));}finally{e.close();}
+ record.data.salon_offline_settings.shopName='小林髮廊';e=await mount({record:JSON.stringify(record)});try{assert(e.d.body.textContent.includes('小林髮廊'));}finally{e.close();}
 });

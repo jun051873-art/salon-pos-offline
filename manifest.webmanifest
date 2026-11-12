@@ -1,7 +1,7 @@
 {
   "id": "/salon-pos-offline/",
-  "name": "專屬空間沙龍 POS 單機版",
-  "short_name": "沙龍 POS",
+  "name": "美髮開單",
+  "short_name": "美髮開單",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
